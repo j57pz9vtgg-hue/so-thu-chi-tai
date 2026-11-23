@@ -211,109 +211,267 @@ function model() {
 }
 
 const css = `
-:root{color-scheme:light;--bg:#f1f8f5;--paper:#fbfdfc;--ink:#092f23;--muted:#48645a;--dark:#064632;--mint:#d6f2e2;--active:#c1efd4;--line:#cedfd9;--red:#b71d32;--green:#087146;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(ellipse at 75% 0%,#e3f3ee,transparent 430px),var(--bg);min-height:100vh}
-button,input,select,textarea{font:inherit;color:inherit}
-button{cursor:pointer;border:0;background:transparent}
-button:disabled{opacity:.5;cursor:default}
-:focus-visible{outline:2px solid #13875b;outline-offset:3px}
-[hidden]{display:none!important}
-svg{width:21px;height:21px;vertical-align:middle;flex:none}
-.shell{max-width:520px;margin:auto;padding:max(18px,env(safe-area-inset-top)) 12px calc(153px + env(safe-area-inset-bottom))}
-header{display:flex;justify-content:space-between;align-items:flex-start;padding:0 10px}
-h1,h2,h3,p{margin:0}
-h1{font-size:35px;line-height:1.12;letter-spacing:-1.7px;font-weight:800}
-.subtitle{display:flex;gap:7px;align-items:center;margin-top:6px;font-size:14px}
-.subtitle svg{width:15px;height:17px}
-.icon-button{display:grid;place-items:center;min-width:44px;min-height:44px;border-radius:14px;background:var(--mint)}
-.month{display:grid;grid-template-columns:44px 1fr 44px;gap:14px;margin:14px 8px 14px}
-.month-picker{display:flex;align-items:center;justify-content:center;gap:8px;background:var(--mint);border-radius:14px;text-align:center;font-size:17px;font-weight:750}
-.month-picker svg{width:17px;height:17px;transform:rotate(90deg)}
-.hero{border-radius:20px;background:radial-gradient(ellipse at 15% 95%,#08573e,transparent 70%),#053c2c;color:#fff;padding:17px 16px;text-align:center}
-.hero h2{font-size:18px}
-.balance{display:block;font-size:clamp(25px,8vw,42px);letter-spacing:-1px;overflow-wrap:anywhere;margin:5px 0 15px;font-variant-numeric:tabular-nums}
-.totals{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #75aa95;padding-top:13px;text-align:left}
-.stat{display:flex;align-items:center;gap:8px;min-width:0}
-.stat+ .stat{border-left:1px solid #75aa95;padding-left:10px}
-.stat small,.stat strong{display:block}
-.stat strong{font-size:clamp(12px,3.6vw,17px);overflow-wrap:anywhere;margin-top:3px}
-.stat small{font-size:13px}
-.stat .glyph{background:#b8f5de;color:#064632}
-.panel{background:var(--paper);border:1px solid var(--line);border-radius:18px;margin-top:15px;padding:12px}
-.panel h2,.section-title{font-size:21px;letter-spacing:-.5px;line-height:1.2}
-.section-title{margin:19px 10px 8px}
-.page-title{margin:0 9px 12px;font-size:24px;letter-spacing:-.6px}
-.glyph{width:36px;height:36px;border-radius:12px;background:linear-gradient(120deg,#dff6eb,#ccefd9);display:grid;place-items:center;color:#075331;flex:none}
-.glyph svg{width:20px;height:20px}
-.breakdown{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:8px;align-items:center;margin-top:9px;font-size:13px}
-.breakdown b{display:block;margin-bottom:4px}
-.bar{height:9px;border-radius:20px;background:#e1ebe7;overflow:hidden}
-.bar span{display:block;height:100%;border-radius:20px;background:#078452}
-.tx-list{padding:0 10px}
-.tx,.action-row,.limit-row{display:flex;gap:11px;align-items:center;width:100%;min-height:56px;text-align:left;padding:8px 0}
-.tx+.tx,.action-row+.action-row,.limit-row+.limit-row{border-top:1px solid #e0ebe6}
-.tx-text,.limit-text{flex:1;min-width:0}
-.tx-text strong,.tx-text small,.limit-text small{display:block;overflow-wrap:anywhere}
-.tx-text small,.limit-text small{font-size:13px;color:var(--muted);margin-top:3px}
-.amount{color:var(--red);font-size:clamp(12px,3.9vw,16px);font-weight:750;max-width:45%;overflow-wrap:anywhere;text-align:right}
-.income{color:var(--green)}
-.filters{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
-.filter,.type-choice{min-height:44px;background:#e0f1ea;border-radius:13px;padding:0 12px;font-weight:650}
-.filter[aria-pressed=true],.type-choice[aria-pressed=true],.primary{background:var(--dark);color:#fff}
-.search{flex:1;min-width:130px;position:relative}
-.search svg{position:absolute;left:9px;top:12px}
-.search input{padding-left:36px}
-.empty{padding:13px 2px;color:var(--muted);font-size:14px;line-height:1.5}
-input,select,textarea{width:100%;min-height:44px;border:1px solid #a6c3b8;border-radius:12px;background:#f6faf8;padding:9px 11px;font-size:16px}
-textarea{min-height:71px;resize:vertical}
-label{display:block;font-weight:700;margin:0 0 6px;font-size:14px}
-.primary,.secondary,.danger{min-height:44px;padding:8px 13px;border-radius:12px;font-weight:700}
-.secondary{background:var(--mint)}
-.danger{color:var(--red);background:#fdecef}
-.budget-form{display:flex;gap:8px}
-.budget-form input{min-width:0}
-.usage{display:flex;justify-content:space-between;gap:7px;margin:13px 0 7px;font-size:13px}
-.limit-meter{width:28%;text-align:right;font-size:13px}
-.limit-meter .bar{margin-bottom:3px}
-.over{color:var(--red)}
-.over .bar span{background:var(--red)}
-.action-row svg:last-child{margin-left:auto}
-.dock{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:min(100%,520px);padding:7px 12px max(9px,env(safe-area-inset-bottom));background:var(--bg);z-index:1}
-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));background:#e2f3ed;border-radius:17px;padding:5px;gap:3px}
-nav button{display:grid;justify-items:center;align-content:center;gap:3px;min-height:52px;border-radius:13px;font-size:11px;padding:2px 1px;font-weight:650}
-nav button[aria-current=page]{background:var(--active)}
-nav svg{width:23px;height:23px}
-.fab{position:absolute;right:19px;bottom:calc(78px + env(safe-area-inset-bottom));width:56px;height:56px;border-radius:50%;background:var(--dark);color:#fff;box-shadow:0 3px 6px #0e3c3130}
-.fab svg{width:28px;height:28px}
-dialog{padding:17px 17px max(17px,env(safe-area-inset-bottom));border:1px solid #a7c2b6;border-radius:23px 23px 0 0;background:#f4faf7;color:var(--ink);width:min(100%,495px);max-width:100%;max-height:92vh;margin:auto auto 0;overflow:auto}
-dialog::backdrop{background:#12382e60}
-.dialog-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:11px}
-.dialog-heading h2{font-size:23px;letter-spacing:-.5px}
-.dialog-heading button{min-width:44px;min-height:44px}
-.sheet-handle{width:42px;height:5px;border-radius:10px;background:#9eb6ae;margin:0 auto 5px}
-.types,.form-actions{display:flex;gap:9px;margin-bottom:13px}
-.types button,.form-actions .primary{flex:1}
-.field{margin-bottom:12px}
-.error{color:var(--red);font-size:14px;margin:8px 0}
-.toast{position:fixed;bottom:calc(144px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100% - 32px);background:#123e30;color:#fff;border-radius:12px;padding:10px 14px;z-index:2;font-size:14px}
-.confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:13px}
-.account-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:17px 4px 7px}
-.account-heading h2{font-size:23px;letter-spacing:-.5px}
-.account-actions{display:flex;flex-wrap:wrap;gap:8px}
-#closing-form,#statement-select{margin-top:12px}
-.detail,.family-line{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px;overflow-wrap:anywhere}
-.detail strong,.family-line small{text-align:right}
-.family-line small{color:var(--muted);font-size:13px}
-#remove-closing{margin-top:10px}
-.saving-total{display:block;margin-top:6px;font-size:24px}
-.check{display:flex;align-items:center;gap:8px;min-height:40px}
-.check input{padding:0;width:20px;min-height:20px;accent-color:var(--dark)}
-#saving-schedule{margin-bottom:10px}
-.bank-toolbar{position:sticky;top:0;z-index:1;background:#f4faf7;padding:7px 0;border-bottom:1px solid var(--line)}
-.bank-toolbar p{margin:0 0 5px}.bank-row label{margin:4px 0}.bank-row input,.bank-row select{margin-top:3px}
-.bank-row .empty{padding:4px 0 8px}.bank-paging{display:flex;align-items:center;justify-content:space-between;gap:5px;margin-top:12px}
-@media(max-width:355px){.shell{padding-left:8px;padding-right:8px}.stat{gap:5px}.stat+.stat{padding-left:6px}.glyph{width:31px;height:31px}.breakdown{gap:5px}}
+:root {
+  color-scheme: light;
+  --bg: #f7f5ef;
+  --paper: #fcfaf6;
+  --ink: #182b24;
+  --muted: #535e56;
+  --dark: #124634;
+  --mint: #e9eedb;
+  --line: #ddd9cf;
+  --red: #9c3d34;
+  --green: #1a633d;
+  --frame: 560px;
+  --side: 20px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+h1, h2, h3, p { margin: 0; }
+h1 { color: var(--dark); font-size: clamp(27px, 7.8vw, 36px); line-height: 1.12; letter-spacing: -.045em; font-weight: 780; }
+h2, .section-title { font-size: 20px; letter-spacing: -.025em; line-height: 1.2; }
+.section-title { margin: 22px 0 10px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: transparent; touch-action: manipulation; }
+button:disabled { cursor: default; opacity: .46; }
+button[hidden], [hidden] { display: none !important; }
+:focus-visible { outline: 2px solid #2c6a4d; outline-offset: 3px; }
+svg { display: inline-block; width: 21px; height: 21px; vertical-align: middle; flex: none; }
+.shell {
+  width: min(100%, var(--frame));
+  margin: auto;
+  padding: max(24px, env(safe-area-inset-top, 0px)) var(--side) calc(96px + var(--safe-bottom));
+}
+.shell.with-fab { padding-bottom: calc(154px + var(--safe-bottom)); }
+.page-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 15px; }
+.page-header button { flex: none; }
+.page-header h1 { overflow-wrap: anywhere; }
+.back {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 5px 0 0;
+  color: var(--dark); min-height: 44px; margin: -8px 0 2px; font-weight: 650; font-size: 14px;
+}
+.back svg { width: 17px; height: 17px; }
+.month {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; min-height: 46px;
+  border: 1px solid #7f9987; border-radius: 12px; margin-bottom: 15px; overflow: hidden;
+}
+.icon-button, .month-picker { min-height: 44px; border-radius: 9px; }
+.month-picker { font-size: 16px; font-weight: 700; }
+.month button:focus-visible { outline-offset: -3px; }
+.hero {
+  min-width: 0; border-radius: 17px; background: var(--dark); color: #fffdf8; padding: 17px 20px 19px;
+}
+.hero h2 { font-size: 15px; font-weight: 550; letter-spacing: 0; }
+.balance {
+  display: block; font-size: clamp(27px, 9vw, 42px); font-weight: 780;
+  line-height: 1.13; letter-spacing: -.045em; overflow-wrap: anywhere; margin: 6px 0 15px;
+  font-variant-numeric: tabular-nums;
+}
+.totals { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid #719584; padding-top: 12px; }
+.stat { min-width: 0; }
+.stat + .stat { border-left: 1px solid #719584; padding-left: 16px; }
+.stat:first-child { padding-right: 10px; }
+.stat small, .stat strong { display: block; }
+.stat small { font-size: 13px; color: #d9e8dc; }
+.stat strong { margin-top: 4px; font-size: clamp(13px, 4.1vw, 18px); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.section-heading { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin: 13px 0 1px; }
+.section-heading h2 { margin: 0; }
+.text-button { min-height: 44px; color: var(--dark); flex: none; font-size: 13px; font-weight: 680; padding: 0; }
+.text-button svg { width: 15px; height: 15px; }
+.panel, .group {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 15px; margin-top: 14px; padding: 13px;
+}
+.panel > h2 { margin-bottom: 8px; }
+.group { padding: 0 12px; }
+.group + .group { margin-top: 20px; }
+.summary-group { margin-top: 17px; }
+summary { list-style: none; cursor: pointer; touch-action: manipulation; }
+summary::-webkit-details-marker { display: none; }
+.summary-line, .menu-label { display: flex; align-items: center; gap: 11px; }
+.summary-line {
+  min-height: 50px; font-size: 15px; font-weight: 720; padding: 3px 0;
+}
+.summary-line > :last-child, .menu-row > :last-child { margin-left: auto; }
+.disclosure-arrow svg { width: 16px; height: 16px; transition: transform .15s ease; }
+details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
+.details-divider + .details-divider { border-top: 1px solid var(--line); }
+.report-content { padding: 0 0 10px; }
+.menu-row, .tx, .action-row, .limit-row {
+  display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; min-height: 55px; padding: 9px 0;
+}
+.menu-row { min-height: 66px; }
+.menu-row + .menu-row, .tx + .tx, .action-row + .action-row, .limit-row + .limit-row { border-top: 1px solid var(--line); }
+.menu-row strong { display: block; font-size: 16px; }
+.menu-row small { display: block; font-size: 13px; color: var(--muted); margin-top: 3px; line-height: 1.3; }
+.menu-row > span:last-child svg, .action-row > span:last-child svg { width: 16px; height: 16px; }
+.action-row > :last-child { margin-left: auto; }
+.glyph {
+  width: 38px; height: 38px; border-radius: 10px; background: var(--mint);
+  display: grid; place-items: center; color: var(--dark); flex: none;
+}
+.glyph svg { width: 20px; height: 20px; }
+.glyph[data-tone="food"] { background: #f8eac7; color: #78561e; }
+.glyph[data-tone="shopping"] { background: #f6e5d6; color: #7e4b2a; }
+.glyph[data-tone="transport"] { background: #e2edf1; color: #285264; }
+.glyph[data-tone="home"] { background: #e4eee5; color: #245342; }
+.glyph[data-tone="health"] { background: #f2e5eb; color: #713d52; }
+.glyph[data-tone="education"] { background: #eae7f1; color: #504771; }
+.glyph[data-tone="utilities"] { background: #e3edf1; color: #285264; }
+.tx-text, .limit-text { flex: 1; min-width: 0; }
+.tx-text strong, .tx-text small, .limit-text small { display: block; overflow-wrap: anywhere; }
+.tx-text strong {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; font-weight: 690; font-size: 15px;
+}
+.tx-text small, .limit-text small { font-size: 13px; color: var(--muted); margin-top: 3px; line-height: 1.3; }
+.amount {
+  color: var(--ink); font-size: clamp(12px, 3.7vw, 16px); font-weight: 700; max-width: 45%;
+  overflow-wrap: anywhere; text-align: right; font-variant-numeric: tabular-nums;
+}
+.income { color: var(--green); }
+.ledger { margin-top: 10px; scroll-margin-top: 10px; }
+.day-heading { margin-top: 13px; padding: 7px 9px; border-radius: 7px; background: #ebe8df; font-size: 12px; font-weight: 700; color: #414c43; }
+.breakdown { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; gap: 8px; align-items: center; padding: 5px 0; font-size: 13px; }
+.breakdown b { display: block; margin-bottom: 4px; }
+.breakdown > strong { text-align: right; overflow-wrap: anywhere; }
+.bar { height: 8px; border-radius: 20px; background: #e9e6df; overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 20px; background: #327657; }
+.ledger-controls { position: relative; margin-top: 4px; }
+.search { margin-right: 103px; position: relative; }
+.search svg { position: absolute; left: 10px; top: 12px; width: 19px; height: 19px; color: var(--muted); }
+.search input { padding-left: 36px; }
+.filter-toggle {
+  position: absolute; top: 0; right: 0; display: flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 10px; border: 1px solid #7f9987; border-radius: 10px; color: var(--dark);
+  font-size: 13px; font-weight: 700;
+}
+.filter-toggle svg, .download-icon svg { width: 17px; height: 17px; }
+.filter-toggle.is-active, #transaction-filters[open] .filter-toggle { background: var(--mint); }
+.filter-fields { padding: 12px; margin-top: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.filters, .types {
+  display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); border: 1px solid var(--line);
+  border-radius: 11px; overflow: hidden; margin: 13px 0 0;
+}
+.types { grid-template-columns: 1fr 1fr; margin: 0 0 15px; }
+.filter, .type-choice { min-height: 44px; padding: 0 9px; font-size: 14px; font-weight: 650; }
+.filter + .filter, .type-choice + .type-choice { border-left: 1px solid var(--line); }
+.filter:focus-visible, .type-choice:focus-visible { outline-offset: -3px; }
+.filter[aria-pressed=true], .type-choice[aria-pressed=true], .primary { background: var(--dark); color: #fff; }
+.type-choice svg { width: 17px; height: 17px; }
+.empty { padding: 11px 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.empty-state { padding: 16px 0 19px; margin: 0; border-bottom: 1px solid var(--line); }
+input, select, textarea {
+  display: block; width: 100%; min-width: 0; min-height: 44px; border: 1px solid #c6c6bc; border-radius: 10px;
+  background: var(--paper); padding: 9px 10px; font-size: 16px;
+}
+input[type=date] { text-align: left; }
+textarea { min-height: 62px; resize: vertical; }
+label { display: block; font-weight: 690; margin: 0 0 5px; font-size: 13px; }
+.primary, .secondary, .danger {
+  min-height: 44px; border-radius: 10px; padding: 8px 12px; font-size: 14px; font-weight: 710;
+}
+.secondary { color: var(--dark); border: 1px solid #8da38e; background: transparent; }
+.danger { color: var(--red); background: #f6eae5; }
+.budget-form, .account-actions { display: flex; gap: 8px; }
+.account-actions { flex-wrap: wrap; margin-top: 12px; }
+.account-actions > * { flex: 1 1 auto; }
+.usage { display: flex; justify-content: space-between; gap: 8px; margin: 13px 0 7px; font-size: 13px; }
+.limit-meter { width: 28%; text-align: right; font-size: 13px; }
+.limit-meter .bar { margin-bottom: 3px; }
+.over { color: var(--red); }
+.over .bar span { background: var(--red); }
+.dock {
+  position: fixed; z-index: 2; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: min(100%, var(--frame)); background: var(--bg); padding: 0 var(--side) var(--safe-bottom);
+  border-top: 1px solid var(--line);
+}
+nav { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 3px; }
+nav button {
+  position: relative; min-height: 64px; display: grid; justify-items: center; align-content: center;
+  gap: 4px; padding: 4px; color: var(--muted); font-size: 12px; font-weight: 570;
+}
+nav button[aria-current=page] { color: var(--dark); font-weight: 760; }
+nav button[aria-current=page]::after {
+  content: ""; position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);
+  width: 26px; height: 2px; border-radius: 2px; background: var(--dark);
+}
+nav svg { width: 23px; height: 23px; }
+.fab {
+  position: absolute; right: var(--side); bottom: calc(76px + var(--safe-bottom)); display: grid; place-items: center;
+  width: 54px; height: 54px; border-radius: 50%; background: var(--dark); color: #fff;
+  border: 2px solid var(--bg); box-shadow: 0 3px 9px #142f2729;
+}
+.fab svg { width: 25px; height: 25px; }
+dialog {
+  padding: 14px var(--side) max(16px, var(--safe-bottom)); border: 1px solid var(--line);
+  border-radius: 20px 20px 0 0; background: var(--bg); color: var(--ink);
+  width: min(100%, 520px); max-width: 100%; max-height: 92vh; max-height: 92dvh;
+  margin: auto auto 0; overflow: auto;
+}
+dialog::backdrop { background: #15201a78; }
+.dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin-bottom: 8px; }
+.dialog-heading h2 { color: var(--dark); font-size: 22px; letter-spacing: -.03em; }
+.dialog-heading button { flex: none; min-width: 44px; min-height: 44px; }
+.sheet-handle { width: 38px; height: 4px; border-radius: 5px; background: #9b9e94; margin: 0 auto 4px; }
+.form-actions { display: flex; gap: 8px; margin: 12px 0 0; }
+.form-actions .primary { flex: 1; min-height: 46px; }
+.field { margin-bottom: 10px; min-width: 0; }
+.field:last-child { margin-bottom: 0; }
+.field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.field-pair .field { margin: 0; }
+.field-pair:has(> [hidden]) { grid-template-columns: 1fr; }
+.amount-field { position: relative; }
+.amount-field input { padding-right: 33px; }
+.amount-field span { position: absolute; right: 11px; bottom: 13px; color: var(--muted); font-size: 15px; pointer-events: none; }
+.editor-options { margin: 11px 0 0; border-top: 1px solid var(--line); }
+.editor-options[open] .option-fields { padding-bottom: 3px; }
+.error { color: var(--red); font-size: 14px; margin: 8px 0; }
+.toast {
+  position: fixed; z-index: 3; bottom: calc(134px + var(--safe-bottom)); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - 32px); background: var(--dark); color: #fff;
+  border-radius: 10px; padding: 10px 14px; font-size: 14px;
+}
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 13px; }
+#closing-form, #statement-select { margin: 12px 0 0; }
+.detail, .family-line {
+  display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line);
+  font-size: 14px; overflow-wrap: anywhere;
+}
+.detail strong, .family-line small { text-align: right; }
+.family-line small { color: var(--muted); font-size: 13px; }
+#remove-closing { margin-top: 12px; }
+.saving-total { display: block; margin: 5px 0 0; font-size: clamp(23px, 7vw, 35px); color: var(--dark); overflow-wrap: anywhere; }
+.card-summary { margin: 12px 0 0; padding: 14px; }
+.card-summary .saving-total { color: #fffdf8; }
+.card-summary .empty { color: #d9e8dc; padding: 7px 0 0; }
+.check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.check input { padding: 0; width: 20px; min-height: 20px; accent-color: var(--dark); }
+#saving-schedule { margin-bottom: 10px; }
+.bank-toolbar { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 7px 0; border-bottom: 1px solid var(--line); }
+.bank-toolbar p { margin: 0 0 5px; }
+.bank-row label { margin: 4px 0; }
+.bank-row input, .bank-row select { margin-top: 3px; }
+.bank-row .empty { padding: 4px 0 8px; }
+.bank-paging { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 12px; }
+@media (max-width: 365px) {
+  :root { --side: 14px; }
+  .hero { padding-inline: 15px; }
+  .stat + .stat { padding-left: 10px; }
+  .field-pair { grid-template-columns: 1fr; }
+  .breakdown { gap: 5px; }
+}
+@media (max-height: 640px) {
+  .dock { display: flex; align-items: center; gap: 4px; }
+  .dock nav { flex: 1; }
+  .fab { position: static; order: 1; flex: 0 0 auto; width: 46px; height: 46px; }
+  .shell.with-fab { padding-bottom: calc(96px + var(--safe-bottom)); }
+}
+@media (prefers-reduced-motion: reduce) { .disclosure-arrow svg { transition: none; } }
 `;
 
 function statementReader(validDate, isAmount, normalize) {
@@ -601,7 +759,9 @@ function webApp(initial, getModel, getStatementReader) {
     pie:'<path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M15 3.5a9 9 0 0 1 5.5 5.5H15z"/>',
     plus:'<path d="M12 4v16M4 12h16"/>', left:'<path d="m15 5-7 7 7 7"/>',
     right:'<path d="m9 5 7 7-7 7"/>', x:'<path d="m6 6 12 12M18 6 6 18"/>',
-    phone:'<rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/>',
+    funnel:'<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    stash:'<path d="M4 9 6 5h8l3 4h2v6h-2l-2 4h-2l-1-2H8l-1 2H5l-2-5V9zM19 10h2M12 9h.01"/>',
+    people:'<circle cx="12" cy="8" r="3"/><path d="M7 20v-2a5 5 0 0 1 10 0v2M18 6a2 2 0 0 1 0 4m4 9v-2a4 4 0 0 0-3-4M6 6a2 2 0 0 0 0 4m-4 9v-2a4 4 0 0 1 3-4"/>',
     up:'<path d="M12 20V4m-6 6 6-6 6 6"/>', down:'<path d="M12 4v16m-6-6 6 6 6-6"/>',
     search:'<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 5 5"/>',
     food:'<path d="M4 3v6a3 3 0 0 0 6 0V3M7 3v18M18 3c-2 3-3 5-3 9h4m0-9v18"/>',
@@ -617,10 +777,9 @@ function webApp(initial, getModel, getStatementReader) {
     gift:'<path d="M4 10h16v11H4zM3 6h18v4H3zM12 6v15M12 6C5 6 5 1 8 2c2 0 4 4 4 4zm0 0c7 0 7-5 4-4-2 0-4 4-4 4z"/>',
     download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
     upload:'<path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/>',
-    settings:'<circle cx="12" cy="12" r="3"/><path d="M10 3h4l.5 2.4 2 .9 2-.9 2 3.4-1.7 1.5v2.5l1.7 1.5-2 3.4-2-.9-2 .9L14 20h-4l-.5-2.3-2-.9-2 .9-2-3.4 1.7-1.5v-2.5L3.5 8.8l2-3.4 2 .9 2-.9z"/>',
   };
   const svg = (key) => '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">' + icons[key] + '</svg>';
-  const glyph = (key) => '<span class="glyph">' + svg(key) + '</span>';
+  const glyph = (key, tone = "") => '<span class="glyph" data-tone="' + tone + '">' + svg(key) + '</span>';
   const enc = (str) => String(str).replace(/[&<>"']/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
   const money = new Intl.NumberFormat("vi-VN");
   const fmt = (n) => money.format(n) + " ₫";
@@ -638,6 +797,13 @@ function webApp(initial, getModel, getStatementReader) {
   const TRANSACTION_PAGE_SIZE = 50;
   let month = today.slice(0, 7);
   let tab = "overview";
+  const pageTitles = {
+    overview: "Sổ Thu Chi", transactions: "Giao dịch", accounts: "Sổ tiền",
+    budget: "Ngân sách", cards: "Thẻ tín dụng", savings: "Tiết kiệm",
+    people: "Gia đình", backup: "Sao lưu dữ liệu",
+  };
+  const accountPages = new Set(["budget", "cards", "savings", "people", "backup"]);
+  const pageActions = { transactions: "open-bank", cards: "new-card", savings: "new-saving", people: "new-person" };
   let filter = "all";
   let type = "expense";
   let editing = null;
@@ -705,16 +871,21 @@ function webApp(initial, getModel, getStatementReader) {
     return '<div class="bar" aria-hidden="true"><span style="width:' + Math.min(percent, 100)
       + '%;' + (color ? 'background:' + color : '') + '"></span></div>';
   }
-  function rows(items, empty) {
-    if (!items.length) return '<p class="empty">' + empty + '</p>';
+  function rows(items, empty, groupByDay = false) {
+    if (!items.length) return '<p class="empty empty-state">' + empty + '</p>';
+    let day = "";
     return items.map((item) => {
       const [, icon] = categories[item.type][item.category];
       const name = transactionLabel(item);
       const incoming = item.type === "income";
-      return '<button class="tx" data-edit="' + item.id + '">' + glyph(icon)
-        + '<span class="tx-text"><strong>' + enc(item.note || name) + '</strong><small>' + name + ' · '
-        + dateName(item.date) + (item.member ? " · " + enc(personName(item.member)) : "")
-        + (item.cardId ? " · " + enc(data.cards.find((card) => card.id === item.cardId).name) : "") + '</small></span><span class="amount' + (incoming ? ' income' : '') + '">'
+      const header = groupByDay && day !== item.date
+        ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
+      day = item.date;
+      const subtitle = [groupByDay ? name : dateName(item.date), item.member && personName(item.member),
+        item.cardId && data.cards.find((card) => card.id === item.cardId).name].filter(Boolean).join(" · ");
+      return header + '<button class="tx" data-edit="' + item.id + '">' + glyph(icon, item.category)
+        + '<span class="tx-text"><strong>' + enc(item.note || name) + '</strong><small>' + enc(subtitle)
+        + '</small></span><span class="amount' + (incoming ? ' income' : '') + '">'
         + signed(incoming ? item.amount : -item.amount) + '</span></button>';
     }).join("");
   }
@@ -728,7 +899,7 @@ function webApp(initial, getModel, getStatementReader) {
       return '<div class="breakdown">' + glyph(icon) + '<div><b>' + name + '</b>' + bar(percent, color)
         + '</div><span>' + percent + '%</span><strong>' + fmt(amount) + '</strong></div>';
     }).join("") || '<p class="empty">Chưa có khoản chi trong tháng này.</p>';
-    $("recent").innerHTML = rows(summary.items.filter((item) => !item.purpose).slice(0, 5), "Chạm nút + để ghi khoản thu hoặc chi đầu tiên.");
+    $("recent").innerHTML = rows(summary.items.filter((item) => !item.purpose).slice(0, 4), "Chạm nút + để ghi khoản thu hoặc chi đầu tiên.");
   }
   function renderItems(summary) {
     const query = searchKey($("query").value.trim());
@@ -741,7 +912,8 @@ function webApp(initial, getModel, getStatementReader) {
     const pages = Math.max(1, Math.ceil(results.length / TRANSACTION_PAGE_SIZE));
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
-    $("items").innerHTML = rows(results.slice(start, start + TRANSACTION_PAGE_SIZE), "Không tìm thấy giao dịch.");
+    $("items").innerHTML = rows(results.slice(start, start + TRANSACTION_PAGE_SIZE), "Không tìm thấy giao dịch.", true);
+    $("filter-toggle").classList.toggle("is-active", Boolean(member || purpose !== "all"));
     $("transaction-paging").hidden = pages <= 1;
     $("transaction-prev").disabled = transactionPage === 0;
     $("transaction-next").disabled = transactionPage + 1 === pages;
@@ -794,9 +966,12 @@ function webApp(initial, getModel, getStatementReader) {
   }
 
   function renderPeople() {
-    $("people-list").innerHTML = data.people.map((person) =>
-      '<button class="tx" data-person="' + person.id + '"><span class="tx-text"><strong>' + enc(person.name)
-      + '</strong><small>' + (person.family ? 'Thành viên gia đình' : 'Người liên quan') + '</small></span>' + svg("right") + '</button>').join("");
+    const builtIn = Object.values(domain.members).map((name) =>
+      '<div class="tx">' + glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong></span></div>');
+    const custom = data.people.map((person) =>
+      '<button class="tx" data-person="' + person.id + '">' + glyph("person") + '<span class="tx-text"><strong>' + enc(person.name)
+      + '</strong><small>' + (person.family ? 'Thành viên gia đình' : 'Người liên quan') + '</small></span>' + svg("right") + '</button>');
+    $("people-list").innerHTML = [...builtIn, ...custom].join("");
     const totals = new Map();
     let vouchers = 0;
     for (const item of data.items) {
@@ -850,9 +1025,11 @@ function webApp(initial, getModel, getStatementReader) {
     $("statement-select").replaceChildren(...latest.map((date) => new Option(dateName(date), date)));
     $("statement-select").value = selectedClosing;
     $("statement-select").hidden = !latest.length;
+    $("closing-options").open = !latest.length;
     const debt = data.items.reduce((sum, item) => sum + (item.cardId === cardId && item.date <= today ? item.amount : 0), 0)
       - card.credits.reduce((sum, credit) => sum + (credit.date <= today ? credit.amount : 0), 0);
-    text("card-debt", debt >= 0 ? "Dư nợ " + fmt(debt) : "Số dư có " + fmt(-debt));
+    text("card-debt-label", debt >= 0 ? "Dư nợ hiện tại" : "Số dư có");
+    text("card-debt", fmt(Math.abs(debt)));
     text("card-terms", "Chốt ngày " + card.closeDay + " · Thanh toán ngày " + card.dueDay);
     $("card-credits").innerHTML = card.credits.slice().reverse().sort((a, b) => b.date.localeCompare(a.date)).map((credit) =>
       '<button class="tx" data-credit="' + credit.id + '"><span class="tx-text"><strong>' + creditLabel(credit.kind)
@@ -973,6 +1150,7 @@ function webApp(initial, getModel, getStatementReader) {
     $("card-purchase").onclick = () => {
       openEditor();
       $("item-card").value = cardId;
+      $("editor-options").open = true;
       $("date").value = today;
     };
     $("add-credit").onclick = () => openCredit();
@@ -1091,19 +1269,26 @@ function webApp(initial, getModel, getStatementReader) {
     if (tab === "people") renderPeople();
     if (tab === "budget") renderBudget(summary);
   }
-  function go(next) {
+  function go(next, moveFocus = true) {
     tab = next;
-    const accountPage = tab === "cards" || tab === "savings";
-    $("month-controls").hidden = accountPage;
-    $("add").hidden = accountPage;
+    const nested = accountPages.has(tab);
+    const showAdd = tab === "overview" || tab === "transactions" || tab === "people";
+    $("month-controls").hidden = !["overview", "transactions", "budget", "people"].includes(tab);
+    $("account-back").hidden = !nested;
+    for (const [page, button] of Object.entries(pageActions)) $(button).hidden = page !== tab;
+    $("add").hidden = !showAdd;
+    $("page-shell").classList.toggle("with-fab", showAdd);
     $("toast").hidden = true;
-    for (const button of document.querySelectorAll("[data-tab]")) {
-      if (button.dataset.tab === tab) button.setAttribute("aria-current", "page");
+    text("page-title", pageTitles[tab]);
+    const current = nested ? "accounts" : tab;
+    for (const button of document.querySelectorAll("nav [data-tab]")) {
+      if (button.dataset.tab === current) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
     }
     for (const page of document.querySelectorAll("[data-page]")) page.hidden = page.dataset.page !== tab;
     render();
     window.scrollTo(0, 0);
+    if (moveFocus) $("page-title").focus({ preventScroll: true });
   }
   function stepMonth(delta) {
     const [year, current] = month.split("-").map(Number);
@@ -1130,6 +1315,7 @@ function webApp(initial, getModel, getStatementReader) {
       ...personOptions().map(([id, name]) => new Option(name, id)));
     $("item-member").value = item && item.member || "";
     $("item-purpose").value = item && item.purpose || "";
+    $("editor-options").open = Boolean(item && (item.purpose || item.member || item.cardId));
     text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
     $("amount").value = item ? money.format(item.amount) : "";
     $("date").value = item ? item.date : month === today.slice(0,7) ? today : month + "-01";
@@ -1243,10 +1429,7 @@ function webApp(initial, getModel, getStatementReader) {
     if (close) $(close).close();
     if (selected) chooseType(selected);
     if (selection) {
-      filter = selection;
-      for (const control of document.querySelectorAll("[data-filter]")) {
-        control.setAttribute("aria-pressed", String(control.dataset.filter === filter));
-      }
+      setTransactionType(selection);
       resetItemResults();
     }
   });
@@ -1267,7 +1450,21 @@ function webApp(initial, getModel, getStatementReader) {
   $("previous").onclick = () => stepMonth(-1);
   $("next").onclick = () => stepMonth(1);
   $("add").onclick = () => openEditor();
-  $("settings").onclick = () => { go("budget"); $("backup").scrollIntoView({ block: "center" }); };
+  function setTransactionType(selection) {
+    filter = selection;
+    for (const button of document.querySelectorAll("[data-filter]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.filter === filter));
+    }
+  }
+  $("view-all").onclick = () => {
+    $("query").value = "";
+    $("purpose-filter").value = "all";
+    $("member-filter").value = "";
+    $("transaction-filters").open = false;
+    transactionPage = 0;
+    setTransactionType("all");
+    go("transactions");
+  };
   $("query").oninput = resetItemResults;
   function stepTransactionPage(delta) {
     transactionPage += delta;
@@ -1554,7 +1751,7 @@ function webApp(initial, getModel, getStatementReader) {
   });
 
   bindAccounts();
-  go("overview");
+  go("overview", false);
 }
 
 /* Offline bank-file readers: fflate 0.8.2 and PDF.js 4.10.38.
@@ -7653,47 +7850,77 @@ function page(data) {
 <style>${css}</style>
 </head>
 <body>
-<div class="shell">
-  <header>
-    <div><h1>Sổ Thu Chi</h1><p class="subtitle"><span data-icon="phone"></span>Giữ dữ liệu trên thiết bị</p></div>
-    <button class="icon-button" id="settings" aria-label="Sao lưu dữ liệu" data-icon="settings"></button>
+<div class="shell" id="page-shell">
+  <button class="back" id="account-back" data-tab="accounts" aria-label="Quay về Sổ tiền" hidden><span data-icon="left"></span>Sổ tiền</button>
+  <header class="page-header">
+    <h1 id="page-title" tabindex="-1">Sổ Thu Chi</h1>
+    <button class="secondary" id="open-bank" hidden><span class="download-icon" data-icon="upload"></span> Nhập sao kê</button>
+    <button class="secondary" id="new-card" hidden>Thêm thẻ</button>
+    <button class="secondary" id="new-saving" hidden>Thêm sổ</button>
+    <button class="secondary" id="new-person" hidden>Thêm người</button>
   </header>
   <div class="month" id="month-controls">
     <button class="icon-button" id="previous" aria-label="Tháng trước" data-icon="left"></button>
-    <button class="month-picker" id="month-picker"><span id="month-label" aria-live="polite"></span><span data-icon="right"></span></button>
+    <button class="month-picker" id="month-picker"><span id="month-label" aria-live="polite"></span></button>
     <button class="icon-button" id="next" aria-label="Tháng sau" data-icon="right"></button>
   </div>
   <main>
     <section data-page="overview">
-      <div class="hero">
+      <section class="hero">
         <h2>Chênh lệch tháng</h2><strong id="balance" class="balance"></strong>
         <div class="totals">
-          <div class="stat"><span class="glyph" data-icon="up"></span><div><small>Thu nhập</small><strong id="income"></strong></div></div>
-          <div class="stat"><span class="glyph" data-icon="down"></span><div><small>Chi tiêu</small><strong id="expense"></strong></div></div>
+          <div class="stat"><small>Thu nhập</small><strong id="income"></strong></div>
+          <div class="stat"><small>Chi tiêu</small><strong id="expense"></strong></div>
         </div>
+      </section>
+      <section>
+        <div class="section-heading"><h2>Giao dịch gần đây</h2><button class="text-button" id="view-all">Xem tất cả <span data-icon="right"></span></button></div>
+        <div id="recent"></div>
+      </section>
+      <div class="group summary-group">
+        <details class="details-divider">
+          <summary class="summary-line"><span data-icon="pie"></span>Chi theo danh mục<span class="disclosure-arrow" data-icon="right"></span></summary>
+          <div class="report-content" id="breakdown"></div>
+        </details>
+        <details class="details-divider">
+          <summary class="summary-line"><span data-icon="people"></span>Thu chi gia đình<span class="disclosure-arrow" data-icon="right"></span></summary>
+          <div class="report-content" id="family-summary"></div>
+        </details>
       </div>
-      <section class="panel"><h2>Chi theo danh mục</h2><div id="breakdown"></div></section>
-      <section class="panel"><h2>Gần đây</h2><div id="recent"></div></section>
-      <section class="panel"><h2>Thu chi gia đình</h2><div id="family-summary"></div></section>
     </section>
     <section data-page="transactions" hidden>
-      <div class="account-heading"><h2>Giao dịch</h2><button class="secondary" id="open-bank">Nhập sao kê</button></div>
-      <div class="filters">
+      <div class="ledger-controls">
+        <div class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="Tìm giao dịch" placeholder="Tìm giao dịch"></div>
+        <details id="transaction-filters">
+          <summary class="filter-toggle" id="filter-toggle"><span data-icon="funnel"></span>Bộ lọc</summary>
+          <div class="filter-fields">
+            <div class="field"><label for="purpose-filter">Cách ghi sổ</label><select id="purpose-filter"><option value="all">Tất cả</option><option value="">Thu chi bằng tiền</option></select></div>
+            <div class="field"><label for="member-filter">Thành viên / người liên quan</label><select id="member-filter"><option value="">Cả gia đình</option><option value="unassigned">Chưa phân loại</option></select></div>
+          </div>
+        </details>
+      </div>
+      <div class="filters" role="group" aria-label="Loại giao dịch">
         <button class="filter" data-filter="all" aria-pressed="true">Tất cả</button>
         <button class="filter" data-filter="income" aria-pressed="false">Thu</button>
         <button class="filter" data-filter="expense" aria-pressed="false">Chi</button>
-        <div class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="Tìm giao dịch" placeholder="Tìm giao dịch"></div>
       </div>
-      <label for="purpose-filter">Cách ghi sổ</label><select id="purpose-filter"><option value="all">Tất cả</option><option value="">Thu chi bằng tiền</option></select>
-      <label for="member-filter">Thành viên / người liên quan</label>
-      <select id="member-filter"><option value="">Cả gia đình</option><option value="unassigned">Chưa phân loại</option></select>
-      <div id="items" class="panel tx-list"></div>
+      <div id="items" class="ledger"></div>
       <div class="bank-paging" id="transaction-paging" hidden>
         <button class="secondary" id="transaction-prev">Trang trước</button><span id="transaction-page"></span><button class="secondary" id="transaction-next">Trang sau</button>
       </div>
     </section>
+    <section data-page="accounts" hidden>
+      <div class="group">
+        <button class="menu-row" data-tab="budget" aria-label="Ngân sách"><span class="glyph" data-icon="pie"></span><span class="tx-text"><strong>Ngân sách</strong><small>Giới hạn theo tháng và danh mục</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="cards" aria-label="Thẻ tín dụng"><span class="glyph" data-icon="card"></span><span class="tx-text"><strong>Thẻ tín dụng</strong><small>Dư nợ, kỳ sao kê và thanh toán</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="savings" aria-label="Tiết kiệm"><span class="glyph" data-icon="stash"></span><span class="tx-text"><strong>Tiết kiệm</strong><small>Tiền gửi, lịch lãi và đáo hạn</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="people" aria-label="Gia đình"><span class="glyph" data-icon="people"></span><span class="tx-text"><strong>Gia đình</strong><small>Thành viên, cho mượn và thu chi hộ</small></span><span data-icon="right"></span></button>
+      </div>
+      <div class="group">
+        <button class="menu-row" data-tab="backup" aria-label="Sao lưu dữ liệu"><span class="glyph" data-icon="download"></span><span class="tx-text"><strong>Sao lưu dữ liệu</strong><small>Lưu và khôi phục tệp trên thiết bị</small></span><span data-icon="right"></span></button>
+      </div>
+    </section>
     <section data-page="budget" hidden>
-      <h2 class="page-title">Ngân sách tháng</h2>
       <div class="panel">
         <form id="total-form">
           <label for="total-limit">Giới hạn chi tiêu tháng</label>
@@ -7703,64 +7930,71 @@ function page(data) {
         <div class="usage"><strong>Đã chi tiêu</strong><span id="used"></span></div>
         <div id="total-meter"></div><p class="empty" id="budget-caption"></p>
       </div>
-      <h3 class="section-title">Theo dõi theo danh mục</h3>
-      <div class="panel tx-list" id="limits"></div>
-      <h3 class="section-title" id="backup">Sao lưu dữ liệu (cục bộ)</h3>
-      <div class="panel tx-list">
+      <h2 class="section-title">Ngân sách theo danh mục</h2>
+      <div class="group" id="limits"></div>
+    </section>
+    <section data-page="backup" hidden>
+      <div class="group">
         <button class="action-row" id="export"><span data-icon="download"></span>Sao lưu ra tệp<span data-icon="right"></span></button>
         <button class="action-row" id="import"><span data-icon="upload"></span>Khôi phục từ tệp<span data-icon="right"></span></button>
         <input type="file" id="file" accept=".json,application/json" hidden>
       </div>
     </section>
     <section data-page="cards" hidden>
-      <div class="account-heading"><h2>Thẻ tín dụng</h2><button class="primary" id="new-card">Thêm thẻ</button></div>
       <p class="empty" id="card-empty">Thêm thẻ để theo dõi dư nợ, chốt sao kê và ghi nhận thanh toán.</p>
       <div id="card-content" hidden>
         <section class="panel">
           <label for="card-select">Thẻ đang xem</label>
           <div class="budget-form"><select id="card-select"></select><button class="secondary" id="edit-card">Sửa</button></div>
-          <h3 class="section-title" id="card-debt"></h3><p class="empty" id="card-terms"></p>
-          <div class="account-actions">
-            <button class="secondary" id="card-purchase">Ghi khoản chi</button>
-            <button class="secondary" id="add-credit">Trả thẻ / hoàn tiền</button>
-          </div>
         </section>
+        <section class="hero card-summary">
+          <h2 id="card-debt-label">Dư nợ hiện tại</h2><strong class="saving-total" id="card-debt"></strong>
+          <p class="empty" id="card-terms"></p>
+        </section>
+        <div class="account-actions">
+          <button class="secondary" id="card-purchase">Ghi khoản chi</button>
+          <button class="secondary" id="add-credit">Trả thẻ / hoàn tiền</button>
+        </div>
         <section class="panel">
           <h2>Sao kê</h2>
-          <form id="closing-form">
-            <label for="close-date">Ngày chốt thực tế</label>
-            <div class="field"><input id="close-date" type="date" required></div>
-            <label for="close-due">Ngày đến hạn của kỳ này</label>
-            <div class="budget-form"><input id="close-due" type="date"><button class="primary">Chốt sao kê</button></div>
-            <p id="close-error" class="error" role="alert" hidden></p>
-          </form>
           <select id="statement-select" aria-label="Kỳ sao kê" hidden></select>
           <div id="statement"></div>
+          <details class="editor-options" id="closing-options">
+            <summary class="summary-line">Chọn ngày chốt<span class="disclosure-arrow" data-icon="right"></span></summary>
+            <form id="closing-form">
+              <label for="close-date">Ngày chốt thực tế</label>
+              <div class="field"><input id="close-date" type="date" required></div>
+              <label for="close-due">Ngày đến hạn của kỳ này</label>
+              <div class="budget-form"><input id="close-due" type="date"><button class="primary">Chốt sao kê</button></div>
+              <p id="close-error" class="error" role="alert" hidden></p>
+            </form>
+          </details>
         </section>
         <section class="panel"><h2>Trả thẻ và hoàn tiền</h2><div id="card-credits"></div></section>
       </div>
     </section>
     <section data-page="savings" hidden>
-      <div class="account-heading"><h2>Sổ tiết kiệm</h2><button class="primary" id="new-saving">Thêm sổ</button></div>
       <section class="panel"><h2>Tiền gốc đang gửi</h2><strong class="saving-total" id="saving-total"></strong></section>
-      <section class="panel"><h2>Các sổ theo ngân hàng</h2><div id="saving-list"></div></section>
+      <h2 class="section-title">Tiết kiệm theo ngân hàng</h2>
+      <div class="group" id="saving-list"></div>
     </section>
     <section data-page="people" hidden>
-      <div class="account-heading"><h2>Gia đình và người liên quan</h2><button class="primary" id="new-person">Thêm người</button></div>
-      <section class="panel"><h2>Danh sách bổ sung</h2><div id="people-list"></div></section>
-      <section class="panel"><h2>Cho mượn và thu chi hộ</h2><div id="people-balances"></div><p class="empty" id="voucher-total"></p></section>
+      <h2 class="section-title">Thành viên và người liên quan</h2>
+      <div class="group" id="people-list"></div>
+      <details class="group">
+        <summary class="summary-line">Cho mượn và thu chi hộ<span class="disclosure-arrow" data-icon="right"></span></summary>
+        <div class="report-content" id="people-balances"></div>
+      </details>
+      <p class="empty" id="voucher-total"></p>
     </section>
   </main>
 </div>
 <div class="dock">
   <button class="fab" id="add" aria-label="Thêm giao dịch" data-icon="plus"></button>
   <nav aria-label="Điều hướng">
-    <button data-tab="overview"><span data-icon="home"></span>Tổng quan</button>
+    <button data-tab="overview"><span data-icon="home"></span>Trang chủ</button>
     <button data-tab="transactions"><span data-icon="list"></span>Giao dịch</button>
-    <button data-tab="budget"><span data-icon="pie"></span>Ngân sách</button>
-    <button data-tab="cards"><span data-icon="card"></span>Thẻ tín dụng</button>
-    <button data-tab="savings"><span data-icon="wallet"></span>Tiết kiệm</button>
-    <button data-tab="people"><span data-icon="person"></span>Gia đình</button>
+    <button data-tab="accounts"><span data-icon="wallet"></span>Sổ tiền</button>
   </nav>
 </div>
 <dialog id="editor" aria-labelledby="editor-title">
@@ -7771,13 +8005,20 @@ function page(data) {
       <button type="button" class="type-choice" data-type="expense"><span data-icon="down"></span> Khoản chi</button>
       <button type="button" class="type-choice" data-type="income"><span data-icon="up"></span> Khoản thu</button>
     </div>
-    <div class="field"><label for="amount">Số tiền</label><input id="amount" inputmode="numeric" placeholder="0 ₫" maxlength="17" required></div>
-    <div class="field"><label for="item-purpose">Cách ghi sổ</label><select id="item-purpose"><option value="">Thu chi bằng tiền</option></select></div>
-    <div class="field" id="category-field"><label for="category">Danh mục</label><select id="category"></select></div>
-    <div class="field"><label for="date">Ngày</label><input id="date" type="date" min="1900-01-01" max="2999-12-31" required></div>
-    <div class="field"><label for="item-member">Thành viên / người liên quan</label><select id="item-member"><option value="">Chưa phân loại</option></select></div>
-    <div class="field" id="card-field" hidden><label for="item-card">Thẻ tín dụng</label><select id="item-card"></select></div>
+    <div class="field amount-field"><label for="amount">Số tiền</label><input id="amount" inputmode="numeric" placeholder="Nhập số tiền" maxlength="17" required><span aria-hidden="true">₫</span></div>
+    <div class="field-pair">
+      <div class="field" id="category-field"><label for="category">Danh mục</label><select id="category"></select></div>
+      <div class="field"><label for="date">Ngày</label><input id="date" type="date" min="1900-01-01" max="2999-12-31" required></div>
+    </div>
     <div class="field"><label for="note">Ghi chú</label><textarea id="note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
+    <details class="editor-options" id="editor-options">
+      <summary class="summary-line">Tùy chọn<span class="disclosure-arrow" data-icon="right"></span></summary>
+      <div class="option-fields">
+        <div class="field"><label for="item-member">Thành viên / người liên quan</label><select id="item-member"><option value="">Chưa phân loại</option></select></div>
+        <div class="field" id="card-field" hidden><label for="item-card">Thẻ tín dụng</label><select id="item-card"></select></div>
+        <div class="field"><label for="item-purpose">Cách ghi sổ</label><select id="item-purpose"><option value="">Thu chi bằng tiền</option></select></div>
+      </div>
+    </details>
     <p id="edit-error" class="error" role="alert" hidden></p>
     <div class="form-actions"><button class="danger" type="button" id="delete" hidden>Xóa</button><button class="primary" id="save-item">Lưu giao dịch</button></div>
   </form>
