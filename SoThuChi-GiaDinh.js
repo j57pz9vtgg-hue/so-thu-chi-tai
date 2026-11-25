@@ -243,6 +243,13 @@ function model() {
     }
     return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople, archivedAccounts };
   }
+  const hasAccount = (item) => Boolean(item.accountId || item.cardId);
+
+  function assignedLedger(ledger) {
+    const items = ledger.items.filter(hasAccount);
+    return items.length === ledger.items.length ? ledger : { ...ledger, items };
+  }
+
   function parseBackup(raw) {
     if (typeof raw !== "string" || raw.length > maxBackup) invalid();
     let parsed;
@@ -253,7 +260,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categories, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
+  return { categories, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
 }
 
 const css = `
@@ -805,7 +812,7 @@ function statementReader(validDate, isAmount, normalize) {
   return { read };
 }
 
-function webApp(initial, getModel, getStatementReader) {
+function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const domain = getModel();
   const { categories, localDate } = domain;
   const icons = {
@@ -911,7 +918,7 @@ function webApp(initial, getModel, getStatementReader) {
   }
   function stats() {
     if (summaryCache?.month === month) return summaryCache;
-    const items = data.items.filter((item) => item.date.startsWith(month))
+    const items = data.items.filter((item) => domain.hasAccount(item) && item.date.startsWith(month))
       .reverse().sort((a, b) => b.date.localeCompare(a.date));
     const spending = {};
     let income = 0, expense = 0;
@@ -1363,7 +1370,6 @@ function webApp(initial, getModel, getStatementReader) {
   }
 
   const isAccountArchived = (key) => data.archivedAccounts.includes(key);
-  const hasAccount = (item) => Boolean(item.accountId || item.cardId);
 
   function accountRows() {
     return [
@@ -1390,11 +1396,7 @@ function webApp(initial, getModel, getStatementReader) {
   }
 
   function renderSettings() {
-    const remaining = data.items.reduce((count, item) => count + (hasAccount(item) ? 0 : 1), 0);
-    $("remove-unassigned").hidden = !remaining;
-    text("unassigned-count", remaining + " giao dịch cần xử lý");
-    $("open-archived-accounts").hidden = !data.archivedAccounts.length;
-    $("account-maintenance").hidden = !remaining && !data.archivedAccounts.length;
+    $("account-maintenance").hidden = !data.archivedAccounts.length;
   }
 
   function renderPeriod() {
@@ -1593,8 +1595,12 @@ function webApp(initial, getModel, getStatementReader) {
     if (!file) return;
     try {
       if (file.size > domain.maxBackup) throw new Error("Tệp sao lưu quá lớn.");
-      const next = domain.parseBackup(await file.text());
-      confirm("Khôi phục bản sao lưu", "Thay toàn bộ giao dịch và ngân sách hiện tại bằng bản sao đã chọn (" + next.items.length + " giao dịch)?", "Khôi phục", async () => {
+      const backup = domain.parseBackup(await file.text());
+      const next = domain.assignedLedger(backup);
+      const skipped = backup.items.length - next.items.length;
+      const message = "Thay dữ liệu hiện tại bằng bản sao đã chọn (" + next.items.length + " giao dịch)?"
+        + (skipped ? " Sẽ bỏ qua " + skipped + " giao dịch chưa gán tài khoản." : "");
+      confirm("Khôi phục bản sao lưu", message, "Khôi phục", async () => {
         await persist(next);
         refreshPeople();
         transactionPage = 0;
@@ -1687,16 +1693,6 @@ function webApp(initial, getModel, getStatementReader) {
       notice("Đã khôi phục " + ledgerName(key) + ".");
     } catch (err) { notice(err.message); }
     finally { button.disabled = false; }
-  };
-  $("remove-unassigned").onclick = () => {
-    const count = data.items.reduce((total, item) => total + (hasAccount(item) ? 0 : 1), 0);
-    if (!count) return;
-    confirm("Xóa giao dịch chưa gán", "Xóa vĩnh viễn " + count + " giao dịch chưa có tài khoản? "
-      + "Các giao dịch đã gán tài khoản vẫn được giữ.", "Xóa giao dịch", async () => {
-        await persist({ ...data, items: data.items.filter(hasAccount) });
-        renderSettings();
-        notice("Đã xóa " + count + " giao dịch chưa gán.");
-      });
   };
   $("new-account").onclick = () => {
     $("account-name").value = "";
@@ -2094,6 +2090,7 @@ function webApp(initial, getModel, getStatementReader) {
 
   bindAccounts();
   go("overview", false);
+  if (removedUnassigned) notice("Đã xóa " + removedUnassigned + " giao dịch chưa gán tài khoản.");
 }
 
 /* Offline bank-file readers: fflate 0.8.2 and PDF.js 4.10.38.
@@ -8180,7 +8177,7 @@ AJaEeT7ecVk8/Q5ydLwTZuB4R/FruvLYM5Z0cWN7zzJfXWZ4Lf0OsFYqb3JSKmwwTixbziexhssW6bfP
 `,
 };
 
-function page(data) {
+function page(data, removedUnassigned = 0) {
   const embedded = JSON.stringify(data).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
   return `<!doctype html>
 <html lang="vi">
@@ -8274,8 +8271,7 @@ function page(data) {
         <button class="menu-row" data-tab="backup" aria-label="Sao lưu dữ liệu"><span class="glyph" data-icon="download"></span><span class="tx-text"><strong>Sao lưu dữ liệu</strong><small>Lưu và khôi phục tệp trên thiết bị</small></span><span data-icon="right"></span></button>
       </div>
       <div class="group" id="account-maintenance" hidden>
-        <button class="menu-row" data-tab="archived-accounts" id="open-archived-accounts" aria-label="Tài khoản đã ẩn" hidden><span class="glyph" data-icon="bank"></span><span class="tx-text"><strong>Tài khoản đã ẩn</strong><small>Khôi phục tài khoản đã ẩn</small></span><span data-icon="right"></span></button>
-        <button class="menu-row" id="remove-unassigned" aria-label="Xóa giao dịch chưa gán" hidden><span class="glyph" data-icon="list"></span><span class="tx-text"><strong>Xóa giao dịch chưa gán</strong><small id="unassigned-count"></small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="archived-accounts" aria-label="Tài khoản đã ẩn"><span class="glyph" data-icon="bank"></span><span class="tx-text"><strong>Tài khoản đã ẩn</strong><small>Khôi phục tài khoản đã ẩn</small></span><span data-icon="right"></span></button>
       </div>
     </section>
     <section data-page="archived-accounts" hidden>
@@ -8516,7 +8512,7 @@ function page(data) {
 <script>${bankAssets.zip}</script>
 <script id="bank-pdf-worker" type="text/plain">${bankAssets.worker}</script>
 <script id="bank-pdf-library" type="text/plain">${bankAssets.pdf}</script>
-<script>(${webApp})(${embedded}, ${model}, ${statementReader})</script>
+<script>(${webApp})(${embedded}, ${model}, ${statementReader}, ${removedUnassigned})</script>
 </body>
 </html>`;
 }
@@ -8546,25 +8542,43 @@ function openStore(fm, domain) {
   }
 
   let current = read();
-  return {
-    get data() { return current.data; },
-    save(input) {
-      const next = domain.validate(input);
-      if (read().revision !== current.revision) throw new Error("Sổ đã thay đổi. Hãy đóng rồi mở lại để tải dữ liệu mới.");
-      const revision = current.revision + 1;
-      // Write the alternate slot so an interrupted write leaves the current snapshot intact.
-      fm.writeString(slots[revision % 2], JSON.stringify({ revision, data: next }));
-      current = { revision, data: next };
-    },
-  };
+
+  function save(input) {
+    const next = domain.validate(input);
+    if (read().revision !== current.revision) throw new Error("Sổ đã thay đổi. Hãy đóng rồi mở lại để tải dữ liệu mới.");
+    const revision = current.revision + 1;
+    // Write the alternate slot so an interrupted write leaves the current snapshot intact.
+    fm.writeString(slots[revision % 2], JSON.stringify({ revision, data: next }));
+    current = { revision, data: next };
+  }
+
+  function removeUnassigned() {
+    const next = domain.assignedLedger(current.data);
+    const removed = current.data.items.length - next.items.length;
+    if (!removed) return 0;
+    const backup = fm.joinPath(directory, "pre-account-cleanup-" + current.revision + ".json");
+    const snapshot = JSON.stringify(current.data);
+    if (!fm.fileExists(backup)) fm.writeString(backup, snapshot);
+    if (fm.readString(backup) !== snapshot) throw new Error("Không thể xác minh bản sao trước khi dọn giao dịch.");
+    save(next);
+    const saved = read();
+    if (saved.revision !== current.revision || saved.data.items.length !== next.items.length
+        || saved.data.items.some((item) => !domain.hasAccount(item))) {
+      throw new Error("Không thể xác minh sổ sau khi dọn giao dịch.");
+    }
+    return removed;
+  }
+
+  return { get data() { return current.data; }, save, removeUnassigned };
 }
 
 async function run() {
   const fm = FileManager.local();
   const domain = model();
   const store = openStore(fm, domain);
+  const removedUnassigned = store.removeUnassigned();
   const view = new WebView();
-  await view.loadHTML(page(store.data));
+  await view.loadHTML(page(store.data, removedUnassigned));
   let closed = false;
   const presented = view.present(false).finally(() => { closed = true; });
   async function bridge() {
