@@ -50,19 +50,35 @@ function model() {
     return candidate > close ? candidate : cycleDate(close, 1, day);
   }
 
-  function statement(card, items, closing, today) {
+  function latestOpening(openings, key, month) {
+    return openings.reduce((latest, entry) => (
+      entry.key === key && entry.month <= month && (!latest || entry.month > latest.month) ? entry : latest
+    ), null);
+  }
+
+  function cardBalance(card, charges, openings, date) {
+    const anchor = latestOpening(openings, "card:" + card.id, date.slice(0, 7));
+    const start = anchor ? anchor.month + "-01" : "";
+    let debt = anchor ? anchor.amount : 0;
+    for (const item of charges) if (item.date >= start && item.date <= date) debt += item.amount;
+    for (const item of card.credits) if (item.date >= start && item.date <= date) debt -= item.amount;
+    return debt;
+  }
+
+  function statement(card, items, closing, today, openings = []) {
     const previous = card.closings.filter((date) => date < closing).sort().pop() || cycleDate(closing, -1, card.closeDay);
     const charges = items.filter((item) => item.cardId === card.id);
     const credits = card.credits;
     const sum = (rows, test) => rows.reduce((total, row) => total + (test(row.date) ? row.amount : 0), 0);
     const inPeriod = (date) => date > previous && date <= closing;
-    const opening = sum(charges, (date) => date <= previous) - sum(credits, (date) => date <= previous);
+    const opening = cardBalance(card, charges, openings, previous);
     const spend = sum(charges, inPeriod);
     const paid = sum(credits.filter((entry) => entry.kind === "payment"), inPeriod);
     const refunded = sum(credits.filter((entry) => entry.kind === "refund"), inPeriod);
-    const closingBalance = opening + spend - paid - refunded;
+    const closingBalance = cardBalance(card, charges, openings, closing);
+    const adjustment = closingBalance - (opening + spend - paid - refunded);
     const outstanding = Math.max(0, closingBalance - sum(credits, (date) => date > closing && date <= today));
-    return { previous, spend, paid, refunded, opening, closingBalance, outstanding,
+    return { previous, spend, paid, refunded, opening, closingBalance, outstanding, adjustment,
       entries: [...charges.filter((entry) => inPeriod(entry.date)), ...credits.filter((entry) => inPeriod(entry.date))]
         .sort((a, b) => b.date.localeCompare(a.date)) };
   }
@@ -160,6 +176,23 @@ function model() {
     const cards = validateCards(input.cards);
     const savings = validateSavings(input.savings);
     const cardIds = new Set(cards.map((card) => card.id));
+    const accountIds = new Set(["cash"]);
+    const accounts = list(input.accounts, 250).map((account) => {
+      if (!object(account) || !validId(account.id) || accountIds.has(account.id) || !validName(account.name)) invalid();
+      accountIds.add(account.id);
+      return { id: account.id, name: account.name };
+    });
+    const accountKeys = new Set(["cash", ...accounts.map((account) => "bank:" + account.id),
+      ...cards.map((card) => "card:" + card.id)]);
+    const openingKeys = new Set();
+    const openings = list(input.openings, maxRows).map((entry) => {
+      if (!object(entry) || !accountKeys.has(entry.key) || !validMonth(entry.month)
+          || !Number.isSafeInteger(entry.amount) || Math.abs(entry.amount) > maxAmount) invalid();
+      const key = entry.key + "/" + entry.month;
+      if (openingKeys.has(key)) invalid();
+      openingKeys.add(key);
+      return { key: entry.key, month: entry.month, amount: entry.amount };
+    });
     const personIds = new Set();
     const people = list(input.people, 250).map((person) => {
       if (!object(person) || !validId(person.id) || own(members, person.id) || person.id === "unassigned"
@@ -177,14 +210,15 @@ function model() {
           || item.note.length > 200) invalid();
       ids.add(item.id);
       const { id, type, category, amount, date, note } = item;
-      const { cardId, member, purpose, importId } = item;
+      const { cardId, accountId, member, purpose, importId } = item;
       if (cardId !== undefined && (type !== "expense" || !cardIds.has(cardId))) invalid();
+      if (accountId !== undefined && (cardId || !accountIds.has(accountId))) invalid();
       if (member !== undefined && (typeof member !== "string" || (!own(members, member) && !personIds.has(member)))) invalid();
       if (purpose !== undefined && (typeof purpose !== "string" || !own(purposes, purpose) || purposes[purpose][1] !== type
           || cardId || (!member && /^(loan|proxy)_/.test(purpose)) || (member === "shared" && /^(loan|proxy)_/.test(purpose)))) invalid();
       if (importId !== undefined && (typeof importId !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(importId) || imports.has(importId))) invalid();
       if (importId) imports.add(importId);
-      return { id, type, category, amount, date, note, ...(cardId ? { cardId } : {}), ...(member ? { member } : {}), ...(purpose ? { purpose } : {}), ...(importId ? { importId } : {}) };
+      return { id, type, category, amount, date, note, ...(cardId ? { cardId } : {}), ...(accountId ? { accountId } : {}), ...(member ? { member } : {}), ...(purpose ? { purpose } : {}), ...(importId ? { importId } : {}) };
     });
     const budgets = {};
     for (const [month, limits] of Object.entries(input.budgets)) {
@@ -195,7 +229,7 @@ function model() {
         budgets[month][key] = amount;
       }
     }
-    return { version: 1, items, budgets, cards, savings, people };
+    return { version: 1, items, budgets, cards, savings, people, accounts, openings };
   }
   function parseBackup(raw) {
     if (typeof raw !== "string" || raw.length > maxBackup) invalid();
@@ -207,7 +241,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categories, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, localDate, members, cycleDate, dueDate, statement, savingSchedule, payoutLabels, purposes };
+  return { categories, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
 }
 
 const css = `
@@ -341,6 +375,12 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .breakdown > strong { text-align: right; overflow-wrap: anywhere; }
 .bar { height: 8px; border-radius: 20px; background: #e9e6df; overflow: hidden; }
 .bar span { display: block; height: 100%; border-radius: 20px; background: #327657; }
+.period-summary { margin: 0 0 14px; padding-bottom: 4px; }
+.period-values { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
+.period-values > div + div { border-left: 1px solid var(--line); padding-left: 10px; }
+.period-values dt { color: var(--muted); font-size: 13px; }
+.period-values dd { margin: 5px 0 0; font-size: 17px; font-weight: 740; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.ledger-credit { width: 100%; margin-bottom: 12px; }
 .ledger-controls { position: relative; margin-top: 4px; }
 .search { margin-right: 103px; position: relative; }
 .search svg { position: absolute; left: 10px; top: 12px; width: 19px; height: 19px; color: var(--muted); }
@@ -773,6 +813,7 @@ function webApp(initial, getModel, getStatementReader) {
     star:'<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-3-5.5 3 1-6.2L3 9.6l6.2-.9z"/>',
     person:'<circle cx="12" cy="7" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/>',
     card:'<rect x="2" y="5" width="20" height="14" rx="3"/><path d="M2 10h20M6 15h4"/>',
+    bank:'<path d="M2 8l10-5 10 5M3 9h18M5 9v8m5-8v8m4-8v8m5-8v8M3 19h18M2 22h20"/>',
     wallet:'<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M21 10h-6v4h6"/>',
     gift:'<path d="M4 10h16v11H4zM3 6h18v4H3zM12 6v15M12 6C5 6 5 1 8 2c2 0 4 4 4 4zm0 0c7 0 7-5 4-4-2 0-4 4-4 4z"/>',
     download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
@@ -797,13 +838,16 @@ function webApp(initial, getModel, getStatementReader) {
   const TRANSACTION_PAGE_SIZE = 50;
   let month = today.slice(0, 7);
   let tab = "overview";
+  let ledger = "all";
+  let bankTarget = "";
+  let editorAccount = "";
   const pageTitles = {
-    overview: "Sổ Thu Chi", transactions: "Giao dịch", accounts: "Sổ tiền",
+    overview: "Sổ Thu Chi", transactions: "Giao dịch", "account-list": "Tài khoản", accounts: "Sổ tiền",
     budget: "Ngân sách", cards: "Thẻ tín dụng", savings: "Tiết kiệm",
     people: "Gia đình", backup: "Sao lưu dữ liệu",
   };
   const accountPages = new Set(["budget", "cards", "savings", "people", "backup"]);
-  const pageActions = { transactions: "open-bank", cards: "new-card", savings: "new-saving", people: "new-person" };
+  const pageActions = { "account-list": "new-account", transactions: "open-bank", cards: "new-card", savings: "new-saving", people: "new-person" };
   let filter = "all";
   let type = "expense";
   let editing = null;
@@ -871,20 +915,24 @@ function webApp(initial, getModel, getStatementReader) {
     return '<div class="bar" aria-hidden="true"><span style="width:' + Math.min(percent, 100)
       + '%;' + (color ? 'background:' + color : '') + '"></span></div>';
   }
-  function rows(items, empty, groupByDay = false) {
+  function rows(items, empty) {
     if (!items.length) return '<p class="empty empty-state">' + empty + '</p>';
     let day = "";
     return items.map((item) => {
       const [, icon] = categories[item.type][item.category];
-      const name = transactionLabel(item);
+      const name = item.credit ? creditLabel(item.credit) : transactionLabel(item);
       const incoming = item.type === "income";
-      const header = groupByDay && day !== item.date
+      const header = day !== item.date
         ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
       day = item.date;
-      const subtitle = [groupByDay ? name : dateName(item.date), item.member && personName(item.member),
-        item.cardId && data.cards.find((card) => card.id === item.cardId).name].filter(Boolean).join(" · ");
-      return header + '<button class="tx" data-edit="' + item.id + '">' + glyph(icon, item.category)
-        + '<span class="tx-text"><strong>' + enc(item.note || name) + '</strong><small>' + enc(subtitle)
+      const title = item.credit ? name : (item.note || name);
+      const source = itemAccountKey(item);
+      const subtitle = [item.credit ? item.note : name,
+        item.member && personName(item.member), ledger === "all" && source !== "unassigned" && ledgerName(source)]
+        .filter(Boolean).join(" · ");
+      const action = item.credit ? 'data-edit-credit' : 'data-edit';
+      return header + '<button class="tx" ' + action + '="' + item.id + '">' + glyph(item.credit ? "card" : icon, item.category)
+        + '<span class="tx-text"><strong>' + enc(title) + '</strong><small>' + enc(subtitle)
         + '</small></span><span class="amount' + (incoming ? ' income' : '') + '">'
         + signed(incoming ? item.amount : -item.amount) + '</span></button>';
     }).join("");
@@ -899,20 +947,21 @@ function webApp(initial, getModel, getStatementReader) {
       return '<div class="breakdown">' + glyph(icon) + '<div><b>' + name + '</b>' + bar(percent, color)
         + '</div><span>' + percent + '%</span><strong>' + fmt(amount) + '</strong></div>';
     }).join("") || '<p class="empty">Chưa có khoản chi trong tháng này.</p>';
-    $("recent").innerHTML = rows(summary.items.filter((item) => !item.purpose).slice(0, 4), "Chạm nút + để ghi khoản thu hoặc chi đầu tiên.");
   }
   function renderItems(summary) {
     const query = searchKey($("query").value.trim());
     const member = $("member-filter").value;
     const purpose = $("purpose-filter").value;
-    const results = summary.items.filter((item) => (filter === "all" || filter === item.type)
+    const entries = ledger === "all" ? summary.items : itemsInLedger(ledger, summary.items, month);
+    const results = entries.filter((item) => (filter === "all" || filter === item.type)
       && (purpose === "all" || (item.purpose || "") === purpose)
       && (!member || (item.member || "unassigned") === member)
-      && searchKey(item.note + " " + transactionLabel(item) + " " + personName(item.member)).includes(query));
+      && searchKey(item.note + " " + (item.credit ? creditLabel(item.credit) : transactionLabel(item))
+        + " " + personName(item.member)).includes(query));
     const pages = Math.max(1, Math.ceil(results.length / TRANSACTION_PAGE_SIZE));
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
-    $("items").innerHTML = rows(results.slice(start, start + TRANSACTION_PAGE_SIZE), "Không tìm thấy giao dịch.", true);
+    $("items").innerHTML = rows(results.slice(start, start + TRANSACTION_PAGE_SIZE), "Không tìm thấy giao dịch.");
     $("filter-toggle").classList.toggle("is-active", Boolean(member || purpose !== "all"));
     $("transaction-paging").hidden = pages <= 1;
     $("transaction-prev").disabled = transactionPage === 0;
@@ -1026,8 +1075,8 @@ function webApp(initial, getModel, getStatementReader) {
     $("statement-select").value = selectedClosing;
     $("statement-select").hidden = !latest.length;
     $("closing-options").open = !latest.length;
-    const debt = data.items.reduce((sum, item) => sum + (item.cardId === cardId && item.date <= today ? item.amount : 0), 0)
-      - card.credits.reduce((sum, credit) => sum + (credit.date <= today ? credit.amount : 0), 0);
+    const charges = data.items.filter((item) => item.cardId === cardId);
+    const debt = domain.cardBalance(card, charges, data.openings, today);
     text("card-debt-label", debt >= 0 ? "Dư nợ hiện tại" : "Số dư có");
     text("card-debt", fmt(Math.abs(debt)));
     text("card-terms", "Chốt ngày " + card.closeDay + " · Thanh toán ngày " + card.dueDay);
@@ -1040,13 +1089,15 @@ function webApp(initial, getModel, getStatementReader) {
       $("statement").innerHTML = '<p class="empty">Chọn ngày chốt để tạo báo cáo đầu tiên.</p>';
       return;
     }
-    const report = domain.statement(card, data.items, selectedClosing, today);
+    const report = domain.statement(card, data.items, selectedClosing, today, data.openings);
     const due = card.dueDates[selectedClosing] || domain.dueDate(selectedClosing, card.dueDay);
     $("statement").innerHTML =
       detail("Kỳ sao kê", "Sau " + dateName(report.previous) + " đến " + dateName(selectedClosing)) +
       detail("Đến hạn", dateName(due)) + detail("Dư đầu kỳ", fmt(report.opening)) +
       detail("Chi trong kỳ", fmt(report.spend)) + detail("Trả thẻ trong kỳ", fmt(report.paid)) +
-      detail("Hoàn tiền trong kỳ", fmt(report.refunded)) + detail("Dư tại ngày chốt", fmt(report.closingBalance)) +
+      detail("Hoàn tiền trong kỳ", fmt(report.refunded)) +
+      (report.adjustment ? detail("Điều chỉnh số dư đầu kỳ", signed(report.adjustment)) : "") +
+      detail("Dư tại ngày chốt", fmt(report.closingBalance)) +
       detail(report.outstanding > 0 && today > due ? "Còn phải trả · Quá hạn" : "Còn phải trả", fmt(report.outstanding)) +
       '<h3 class="section-title">Giao dịch trong kỳ</h3>' + (report.entries.map((entry) => '<div class="detail"><span>'
         + dateName(entry.date) + ' · ' + enc(entry.note || (entry.kind ? creditLabel(entry.kind) : categories.expense[entry.category][0]))
@@ -1149,7 +1200,7 @@ function webApp(initial, getModel, getStatementReader) {
     $("edit-card").onclick = () => openCard(activeCard());
     $("card-purchase").onclick = () => {
       openEditor();
-      $("item-card").value = cardId;
+      $("item-card").value = "card:" + cardId;
       $("editor-options").open = true;
       $("date").value = today;
     };
@@ -1182,7 +1233,7 @@ function webApp(initial, getModel, getStatementReader) {
       confirm("Xóa khoản ghi nhận", "Xóa khoản trả thẻ hoặc hoàn tiền đã chọn?", "Xóa", async () => {
         await replaceCard({ ...card, credits: card.credits.filter((entry) => entry.id !== id) });
         $("credit-dialog").close();
-        renderCards();
+        render();
       });
     };
     $("delete-saving").onclick = () => {
@@ -1226,7 +1277,8 @@ function webApp(initial, getModel, getStatementReader) {
       const credits = editingCredit ? card.credits.map((old) => old.id === entry.id ? entry : old) : [...card.credits, entry];
       await replaceCard({ ...card, credits });
       $("credit-dialog").close();
-      renderCards();
+      month = date.slice(0, 7);
+      render();
     });
     asyncForm("saving-form", "saving-error", async () => {
       const bank = $("saving-bank").value.trim();
@@ -1257,15 +1309,89 @@ function webApp(initial, getModel, getStatementReader) {
     });
   }
 
+  function primaryAccountName(key) {
+    if (key === "cash") return "Tiền mặt";
+    const id = key.slice(5);
+    return data.accounts.find((account) => account.id === id)?.name || "";
+  }
+
+  function ledgerName(key) {
+    if (key === "all") return "Tất cả giao dịch";
+    if (key === "unassigned") return "Chưa gán tài khoản";
+    if (key.startsWith("card:")) return data.cards.find((card) => card.id === key.slice(5))?.name || "";
+    return primaryAccountName(key);
+  }
+
+  function itemAccountKey(item) {
+    if (item.cardId) return "card:" + item.cardId;
+    if (!item.accountId) return "unassigned";
+    return item.accountId === "cash" ? "cash" : "bank:" + item.accountId;
+  }
+
+  function itemsInLedger(key, source, selectedMonth) {
+    const ledgerItems = source.filter((item) => itemAccountKey(item) === key);
+    if (!key.startsWith("card:")) return ledgerItems;
+    const card = data.cards.find((entry) => entry.id === key.slice(5));
+    if (!card) return ledgerItems;
+    const credits = card.credits.filter((entry) => !selectedMonth || entry.date.startsWith(selectedMonth)).map((entry) =>
+      ({ ...entry, type: "income", category: "other", cardId: card.id, credit: entry.kind }));
+    const rows = [...ledgerItems, ...credits];
+    return selectedMonth ? rows.sort((left, right) => right.date.localeCompare(left.date)) : rows;
+  }
+
+  function renderAccountList() {
+    const row = (key, icon, subtitle) => '<button class="menu-row" data-ledger="' + key + '">' + glyph(icon)
+      + '<span class="tx-text"><strong>' + enc(ledgerName(key)) + '</strong><small>' + subtitle + '</small></span>'
+      + svg("right") + '</button>';
+    $("account-entries").innerHTML = [
+      row("cash", "wallet", "Giao dịch bằng tiền mặt"),
+      ...data.accounts.map((account) => row("bank:" + account.id, "bank", "Tài khoản ngân hàng")),
+      ...data.cards.map((card) => row("card:" + card.id, "card", "Thẻ tín dụng")),
+      row("unassigned", "list", "Giao dịch chưa được gán vào tài khoản"),
+      row("all", "list", "Tra cứu các khoản đã ghi"),
+    ].join("");
+  }
+
+  function renderPeriod() {
+    const card = ledger.startsWith("card:");
+    const anchor = domain.latestOpening(data.openings, ledger, month);
+    const allowed = ledger !== "all" && ledger !== "unassigned";
+    $("period").hidden = !allowed;
+    $("ledger-credit").hidden = !card;
+    if (!allowed) return;
+    text("period-opening-label", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
+    text("period-ending-label", card ? "Dư nợ cuối kỳ" : "Số dư cuối kỳ");
+    let opening = anchor ? anchor.amount : 0;
+    let movement = 0;
+    for (const item of itemsInLedger(ledger, data.items)) {
+      const itemMonth = item.date.slice(0, 7);
+      if (item.purpose === "voucher" || itemMonth > month) continue;
+      const delta = (item.type === "income" ? 1 : -1) * (card ? -1 : 1) * item.amount;
+      if (anchor && itemMonth >= anchor.month && itemMonth < month) opening += delta;
+      if (itemMonth === month) movement += delta;
+    }
+    text("period-opening", anchor ? fmt(opening) : "Chưa nhập");
+    text("period-ending", anchor ? fmt(opening + movement) : "—");
+    text("period-edit", card ? "Nhập dư nợ đầu kỳ" : "Nhập số dư đầu kỳ");
+    $("period-edit").dataset.value = anchor ? String(opening) : "";
+  }
+
+  function closeMonthOpening() {
+    $("opening-options").close();
+    renderPeriod();
+    notice("Đã cập nhật số dư đầu kỳ.");
+  }
+
   function render() {
     if (tab === "cards") return renderCards();
     if (tab === "savings") return renderSavings();
+    if (tab === "account-list") return renderAccountList();
     const summary = stats();
     text("month-label", monthName(month));
     $("previous").disabled = month === "1900-01";
     $("next").disabled = month === "2999-12";
     if (tab === "overview") { renderOverview(summary); renderFamily(summary); }
-    if (tab === "transactions") renderItems(summary);
+    if (tab === "transactions") { renderPeriod(); renderItems(summary); }
     if (tab === "people") renderPeople();
     if (tab === "budget") renderBudget(summary);
   }
@@ -1275,12 +1401,14 @@ function webApp(initial, getModel, getStatementReader) {
     const showAdd = tab === "overview" || tab === "transactions" || tab === "people";
     $("month-controls").hidden = !["overview", "transactions", "budget", "people"].includes(tab);
     $("account-back").hidden = !nested;
+    $("ledger-back").hidden = tab !== "transactions";
     for (const [page, button] of Object.entries(pageActions)) $(button).hidden = page !== tab;
+    if (tab === "transactions") $("open-bank").hidden = ledger !== "all" && !ledger.startsWith("bank:");
     $("add").hidden = !showAdd;
     $("page-shell").classList.toggle("with-fab", showAdd);
     $("toast").hidden = true;
-    text("page-title", pageTitles[tab]);
-    const current = nested ? "accounts" : tab;
+    text("page-title", tab === "transactions" ? ledgerName(ledger) : pageTitles[tab]);
+    const current = nested ? "accounts" : tab === "transactions" ? "account-list" : tab;
     for (const button of document.querySelectorAll("nav [data-tab]")) {
       if (button.dataset.tab === current) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
@@ -1304,18 +1432,29 @@ function webApp(initial, getModel, getStatementReader) {
     if (category) $("category").value = category;
     const purpose = $("item-purpose").value;
     $("category-field").hidden = Boolean(purpose);
-    $("card-field").hidden = Boolean(purpose) || type !== "expense" || !data.cards.length;
+    const account = $("item-card");
+    const previous = account.value;
+    const allowCard = type === "expense" && !purpose;
+    account.replaceChildren(new Option("Chưa gán tài khoản", ""), new Option("Tiền mặt", "cash"),
+      ...data.accounts.map((entry) => new Option(entry.name, "bank:" + entry.id)),
+      ...(allowCard ? data.cards.map((entry) => new Option(entry.name, "card:" + entry.id)) : []));
+    const selection = previous || editorAccount;
+    account.value = [...account.options].some((option) => option.value === selection)
+      ? selection : ledger.startsWith("card:") ? "cash" : "";
+    editorAccount = account.value;
     for (const button of document.querySelectorAll("[data-type]")) button.disabled = Boolean(purpose);
   }
   function openEditor(item = null) {
     editing = item;
-    $("item-card").replaceChildren(new Option("Không dùng thẻ tín dụng", ""), ...data.cards.map((card) => new Option(card.name, card.id)));
-    $("item-card").value = item && item.cardId || "";
+    editorAccount = item ? itemAccountKey(item) : tab === "transactions" && ledger !== "all" ? ledger : "cash";
+    if (editorAccount === "unassigned") editorAccount = "";
+    $("item-card").replaceChildren();
     $("item-member").replaceChildren(new Option("Chưa phân loại", ""),
       ...personOptions().map(([id, name]) => new Option(name, id)));
     $("item-member").value = item && item.member || "";
     $("item-purpose").value = item && item.purpose || "";
-    $("editor-options").open = Boolean(item && (item.purpose || item.member || item.cardId));
+    $("editor-options").open = Boolean(item && (item.purpose || item.member || item.cardId
+      || (tab === "transactions" && ledger === "unassigned")));
     text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
     $("amount").value = item ? money.format(item.amount) : "";
     $("date").value = item ? item.date : month === today.slice(0,7) ? today : month + "-01";
@@ -1340,7 +1479,9 @@ function webApp(initial, getModel, getStatementReader) {
       return error("edit-error", "Chọn người liên quan cho khoản này.");
     }
     if (purpose) item.purpose = purpose;
-    if (!purpose && type === "expense" && $("item-card").value) item.cardId = $("item-card").value;
+    const source = $("item-card").value;
+    if (source.startsWith("card:")) item.cardId = source.slice(5);
+    else if (source) item.accountId = source === "cash" ? source : source.slice(5);
     if (editing && editing.importId) item.importId = editing.importId;
     const items = editing ? data.items.map((old) => old.id === id ? item : old) : [...data.items, item];
     $("save-item").disabled = true;
@@ -1421,6 +1562,12 @@ function webApp(initial, getModel, getStatementReader) {
     if (!button) return;
     const { tab: next, edit, limit, close, type: selected, filter: selection } = button.dataset;
     if (next) go(next);
+    if (button.dataset.ledger) showLedger(button.dataset.ledger);
+    if (button.dataset.editCredit) {
+      cardId = ledger.slice(5);
+      const entry = activeCard()?.credits.find((credit) => credit.id === button.dataset.editCredit);
+      if (entry) openCredit(entry);
+    }
     if (edit) {
       const item = data.items.find((entry) => entry.id === edit);
       if (item) openEditor(item);
@@ -1456,7 +1603,12 @@ function webApp(initial, getModel, getStatementReader) {
       button.setAttribute("aria-pressed", String(button.dataset.filter === filter));
     }
   }
-  $("view-all").onclick = () => {
+  function showLedger(key) {
+    ledger = key;
+    if (key.startsWith("card:")) {
+      cardId = key.slice(5);
+      selectedClosing = "";
+    }
     $("query").value = "";
     $("purpose-filter").value = "all";
     $("member-filter").value = "";
@@ -1464,6 +1616,52 @@ function webApp(initial, getModel, getStatementReader) {
     transactionPage = 0;
     setTransactionType("all");
     go("transactions");
+  }
+  $("ledger-credit").onclick = () => { cardId = ledger.slice(5); openCredit(); };
+  $("new-account").onclick = () => {
+    $("account-name").value = "";
+    error("account-error");
+    $("account-dialog").showModal();
+  };
+  asyncForm("account-form", "account-error", async () => {
+    const name = $("account-name").value.trim();
+    if (!name) throw new Error("Nhập tên tài khoản.");
+    if (["Tiền mặt", "Chưa gán tài khoản", "Tất cả giao dịch", ...data.accounts.map((entry) => entry.name)]
+      .some((entry) => searchKey(entry.trim()) === searchKey(name))) throw new Error("Tên tài khoản đã có.");
+    const account = { id: uid(), name };
+    await persist({ ...data, accounts: [...data.accounts, account] });
+    $("account-dialog").close();
+    renderAccountList();
+  });
+  $("period-edit").onclick = () => {
+    const card = ledger.startsWith("card:");
+    text("opening-title", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
+    text("opening-context", ledgerName(ledger) + " · " + monthName(month));
+    text("opening-hint", card ? "Nhập số dương nếu còn nợ, số âm nếu thẻ đang dư tiền."
+      : "Nhập số tiền thực tế trước giao dịch đầu tiên của tháng. Có thể nhập số âm.");
+    const periodValue = $("period-edit").dataset.value;
+    $("opening-amount").value = periodValue ? money.format(Number(periodValue)) : "";
+    $("opening-remove").hidden = !data.openings.some((entry) => entry.key === ledger && entry.month === month);
+    error("opening-error");
+    $("opening-options").showModal();
+  };
+  asyncForm("opening-form", "opening-error", async () => {
+    const raw = $("opening-amount").value.trim().replace(/^−/, "-");
+    const num = amountFrom(raw.startsWith("-") ? raw.slice(1) : raw);
+    const amount = raw.startsWith("-") ? -num : num;
+    if (!Number.isSafeInteger(amount) || Math.abs(amount) > domain.maxAmount) throw new Error("Nhập số dư VND hợp lệ.");
+    const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== month);
+    await persist({ ...data, openings: [...openings, { key: ledger, month, amount }] });
+    closeMonthOpening();
+  });
+  $("opening-remove").onclick = async () => {
+    $("opening-remove").disabled = true;
+    try {
+      const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== month);
+      await persist({ ...data, openings });
+      closeMonthOpening();
+    } catch (err) { error("opening-error", err.message); }
+    finally { $("opening-remove").disabled = false; }
   };
   $("query").oninput = resetItemResults;
   function stepTransactionPage(delta) {
@@ -1496,6 +1694,7 @@ function webApp(initial, getModel, getStatementReader) {
     try { await saveLimit(budgetKey, $("category-limit").value); $("limit-dialog").close(); }
     catch (err) { error("limit-error", err.message); }
   };
+  $("item-card").onchange = () => { editorAccount = $("item-card").value; };
   $("item-purpose").onchange = () => chooseType(domain.purposes[$("item-purpose").value]?.[1] || type);
   $("purpose-filter").onchange = resetItemResults;
   function openPerson(person) {
@@ -1533,6 +1732,7 @@ function webApp(initial, getModel, getStatementReader) {
   const BANK_PAGE_SIZE = 20;
   const bankReader = getStatementReader(domain.validDate, domain.isAmount, searchKey);
   let bankRows = [], bankPage = 0, bankFile = "", bankWorking = false, bankSource = "";
+  let bankReadGeneration = 0;
   const bankExisting = () => new Set(data.items.map((row) => row.importId).filter(Boolean));
   const bankPersonOptions = () => '<option value="">Chưa phân loại</option>' +
     personOptions().map(([id, name]) => '<option value="' + id + '">' + enc(name) + '</option>').join("");
@@ -1641,12 +1841,31 @@ function webApp(initial, getModel, getStatementReader) {
     }
   }
 
-  $("open-bank").onclick = () => { error("bank-error"); $("bank-dialog").showModal(); };
+  $("open-bank").onclick = () => {
+    const next = ledger.startsWith("bank:") ? ledger.slice(5) : "";
+    if (bankTarget !== next) {
+      bankTarget = next;
+      bankReadGeneration++;
+      bankWorking = false;
+      $("pick-bank-file").disabled = false;
+      bankRows = [];
+      bankPage = 0;
+      $("bank-source").value = "";
+      text("bank-file-name", "");
+    }
+    if (bankTarget && !$("bank-source").value.trim()) $("bank-source").value = primaryAccountName("bank:" + bankTarget);
+    $("bank-destination").hidden = !bankTarget;
+    if (bankTarget) text("bank-destination", "Nhập vào " + primaryAccountName("bank:" + bankTarget));
+    error("bank-error");
+    renderBankRows();
+    $("bank-dialog").showModal();
+  };
   $("pick-bank-file").onclick = () => $("bank-file").click();
   $("bank-file").onchange = async (event) => {
     const file = event.target.files[0];
     event.target.value = "";
     if (!file || bankWorking) return;
+    const generation = ++bankReadGeneration;
     bankWorking = true;
     bankRows = [];
     bankPage = 0;
@@ -1656,6 +1875,7 @@ function webApp(initial, getModel, getStatementReader) {
     renderBankRows();
     try {
       const { found, skipped } = await bankReader.read(file);
+      if (generation !== bankReadGeneration) return;
       bankFile = file.name;
       bankSource = null;
       const history = collectHistory();
@@ -1669,12 +1889,16 @@ function webApp(initial, getModel, getStatementReader) {
         (skipped ? " · " + skipped + " dòng/trang cần đối chiếu vì thiếu dữ liệu" : ""));
       if (found.some((row) => row.manual)) notice("Với PDF, đối chiếu số tiền và tích chọn từng dòng cần lưu.");
     } catch (err) {
-      text("bank-file-name", "");
-      error("bank-error", err.message || "Không thể đọc sao kê.");
+      if (generation === bankReadGeneration) {
+        text("bank-file-name", "");
+        error("bank-error", err.message || "Không thể đọc sao kê.");
+      }
     } finally {
-      bankWorking = false;
-      $("pick-bank-file").disabled = false;
-      renderBankRows();
+      if (generation === bankReadGeneration) {
+        bankWorking = false;
+        $("pick-bank-file").disabled = false;
+        renderBankRows();
+      }
     }
   };
   $("bank-source").onchange = () => { bankIdentity(); renderBankRows(); };
@@ -1734,7 +1958,7 @@ function webApp(initial, getModel, getStatementReader) {
       }
       return { id: uid(), type: row.type, amount: row.amount, date: row.date,
         category: categories[row.type][row.category] ? row.category : "other", note: row.description.trim(),
-        importId: row.key, ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
+        importId: row.key, ...(bankTarget ? { accountId: bankTarget } : {}), ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
     });
     if (data.items.length + next.length > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
     await persist({ ...data, items: [...data.items, ...next] });
@@ -7852,9 +8076,11 @@ function page(data) {
 <body>
 <div class="shell" id="page-shell">
   <button class="back" id="account-back" data-tab="accounts" aria-label="Quay về Sổ tiền" hidden><span data-icon="left"></span>Sổ tiền</button>
+  <button class="back" id="ledger-back" data-tab="account-list" aria-label="Quay về Tài khoản" hidden><span data-icon="left"></span>Tài khoản</button>
   <header class="page-header">
     <h1 id="page-title" tabindex="-1">Sổ Thu Chi</h1>
     <button class="secondary" id="open-bank" hidden><span class="download-icon" data-icon="upload"></span> Nhập sao kê</button>
+    <button class="secondary" id="new-account" hidden>Thêm tài khoản</button>
     <button class="secondary" id="new-card" hidden>Thêm thẻ</button>
     <button class="secondary" id="new-saving" hidden>Thêm sổ</button>
     <button class="secondary" id="new-person" hidden>Thêm người</button>
@@ -7873,10 +8099,6 @@ function page(data) {
           <div class="stat"><small>Chi tiêu</small><strong id="expense"></strong></div>
         </div>
       </section>
-      <section>
-        <div class="section-heading"><h2>Giao dịch gần đây</h2><button class="text-button" id="view-all">Xem tất cả <span data-icon="right"></span></button></div>
-        <div id="recent"></div>
-      </section>
       <div class="group summary-group">
         <details class="details-divider">
           <summary class="summary-line"><span data-icon="pie"></span>Chi theo danh mục<span class="disclosure-arrow" data-icon="right"></span></summary>
@@ -7888,7 +8110,18 @@ function page(data) {
         </details>
       </div>
     </section>
+    <section data-page="account-list" hidden>
+      <div class="group" id="account-entries"></div>
+    </section>
     <section data-page="transactions" hidden>
+      <section class="panel period-summary" id="period" hidden>
+        <dl class="period-values">
+          <div><dt id="period-opening-label">Số dư đầu kỳ</dt><dd id="period-opening"></dd></div>
+          <div><dt id="period-ending-label">Số dư cuối kỳ</dt><dd id="period-ending"></dd></div>
+        </dl>
+        <button class="text-button" id="period-edit">Nhập số dư đầu kỳ</button>
+      </section>
+      <button class="secondary ledger-credit" id="ledger-credit" hidden>Trả thẻ / hoàn tiền</button>
       <div class="ledger-controls">
         <div class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="Tìm giao dịch" placeholder="Tìm giao dịch"></div>
         <details id="transaction-filters">
@@ -7993,7 +8226,7 @@ function page(data) {
   <button class="fab" id="add" aria-label="Thêm giao dịch" data-icon="plus"></button>
   <nav aria-label="Điều hướng">
     <button data-tab="overview"><span data-icon="home"></span>Trang chủ</button>
-    <button data-tab="transactions"><span data-icon="list"></span>Giao dịch</button>
+    <button data-tab="account-list"><span data-icon="bank"></span>Tài khoản</button>
     <button data-tab="accounts"><span data-icon="wallet"></span>Sổ tiền</button>
   </nav>
 </div>
@@ -8015,7 +8248,7 @@ function page(data) {
       <summary class="summary-line">Tùy chọn<span class="disclosure-arrow" data-icon="right"></span></summary>
       <div class="option-fields">
         <div class="field"><label for="item-member">Thành viên / người liên quan</label><select id="item-member"><option value="">Chưa phân loại</option></select></div>
-        <div class="field" id="card-field" hidden><label for="item-card">Thẻ tín dụng</label><select id="item-card"></select></div>
+        <div class="field"><label for="item-card">Tài khoản</label><select id="item-card"></select></div>
         <div class="field"><label for="item-purpose">Cách ghi sổ</label><select id="item-purpose"><option value="">Thu chi bằng tiền</option></select></div>
       </div>
     </details>
@@ -8040,9 +8273,31 @@ function page(data) {
     <p id="limit-error" class="error" role="alert" hidden></p>
   </form>
 </dialog>
+<dialog id="account-dialog" aria-labelledby="account-title">
+  <div class="dialog-heading"><h2 id="account-title">Thêm tài khoản ngân hàng</h2><button data-close="account-dialog" aria-label="Đóng" data-icon="x"></button></div>
+  <form id="account-form">
+    <div class="field"><label for="account-name">Tên tài khoản</label><input id="account-name" maxlength="80" placeholder="Ví dụ ACB" required></div>
+    <p id="account-error" class="error" role="alert" hidden></p>
+    <div class="form-actions"><button class="primary" id="account-save">Lưu tài khoản</button></div>
+  </form>
+</dialog>
+<dialog id="opening-options" aria-labelledby="opening-title">
+  <div class="dialog-heading"><h2 id="opening-title"></h2><button data-close="opening-options" aria-label="Đóng" data-icon="x"></button></div>
+  <p class="empty" id="opening-context"></p>
+  <form id="opening-form">
+    <div class="field"><label for="opening-amount">Số tiền (₫)</label><input id="opening-amount" maxlength="18" required></div>
+    <p class="empty" id="opening-hint"></p>
+    <p id="opening-error" class="error" role="alert" hidden></p>
+    <div class="form-actions">
+      <button class="secondary" type="button" id="opening-remove" hidden>Bỏ số dư đã nhập</button>
+      <button class="primary" id="opening-save">Lưu số dư</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="bank-dialog" aria-labelledby="bank-title">
   <div class="dialog-heading"><h2 id="bank-title">Nhập sao kê ngân hàng</h2><button data-close="bank-dialog" aria-label="Đóng" data-icon="x"></button></div>
   <form id="bank-form">
+    <p class="empty" id="bank-destination" hidden></p>
     <div class="field"><label for="bank-source">Tên ngân hàng hoặc tài khoản</label><input id="bank-source" maxlength="80" placeholder="Ví dụ ACB lương vợ" required></div>
     <button class="secondary" id="pick-bank-file" type="button">Chọn Excel, CSV hoặc PDF</button>
     <input type="file" id="bank-file" accept=".xlsx,.csv,.pdf" hidden>
