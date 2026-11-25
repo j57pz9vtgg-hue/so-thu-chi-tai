@@ -14,8 +14,12 @@ function model() {
       gift: ["Quà tặng", "gift"], family: ["Người nhà cho tiền", "gift"], interest: ["Lãi ngân hàng", "wallet"], other: ["Khác", "more"],
     },
   };
-  function categoryDefinitions(custom = []) {
+  function categoryDefinitions(custom = [], deleted = []) {
     const definitions = { expense: { ...defaultCategories.expense }, income: { ...defaultCategories.income } };
+    for (const key of deleted) {
+      const [kind, id] = key.split(":");
+      delete definitions[kind][id];
+    }
     for (const { id, type, name } of custom) {
       definitions[type][id] = type === "expense" ? [name, "tag", "#587d68"] : [name, "tag"];
     }
@@ -187,15 +191,15 @@ function model() {
       customIds.add(entry.id);
       return { id: entry.id, type: entry.type, name: entry.name };
     });
-    const categories = categoryDefinitions(customCategories);
-    const archivable = new Set(Object.entries(categories).flatMap(([kind, entries]) =>
+    const deletableDefaults = new Set(Object.entries(defaultCategories).flatMap(([kind, entries]) =>
       Object.keys(entries).filter((id) => id !== "other").map((id) => kind + ":" + id)));
-    const archived = new Set();
-    const archivedCategories = list(input.archivedCategories, archivable.size).map((key) => {
-      if (!archivable.has(key) || archived.has(key)) invalid();
-      archived.add(key);
+    const deletedKeys = new Set();
+    const deletedDefaultCategories = list(input.deletedDefaultCategories, deletableDefaults.size).map((key) => {
+      if (!deletableDefaults.has(key) || deletedKeys.has(key)) invalid();
+      deletedKeys.add(key);
       return key;
     });
+    const categories = categoryDefinitions(customCategories, deletedDefaultCategories);
     const cards = validateCards(input.cards);
     const savings = validateSavings(input.savings);
     const cardIds = new Set(cards.map((card) => card.id));
@@ -280,7 +284,35 @@ function model() {
       }
     }
     return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople, archivedAccounts,
-      customCategories, archivedCategories };
+      customCategories, deletedDefaultCategories };
+  }
+  function deleteCategory(ledger, kind, id) {
+    const definitions = categoryDefinitions(ledger.customCategories, ledger.deletedDefaultCategories);
+    if (!own(definitions, kind) || !own(definitions[kind], id) || id === "other") {
+      throw new Error("Danh mục này không thể xóa.");
+    }
+    let transactionCount = 0;
+    let limitCount = 0;
+    const items = ledger.items.map((item) => {
+      if (item.type !== kind || item.category !== id) return item;
+      transactionCount++;
+      return { ...item, category: "other" };
+    });
+    const budgets = { ...ledger.budgets };
+    if (kind === "expense") {
+      for (const [month, limits] of Object.entries(budgets)) {
+        if (!own(limits, id)) continue;
+        const next = { ...limits };
+        delete next[id];
+        if (Object.keys(next).length) budgets[month] = next;
+        else delete budgets[month];
+        limitCount++;
+      }
+    }
+    const customCategories = ledger.customCategories.filter((entry) => entry.id !== id);
+    const deletedDefaultCategories = own(defaultCategories[kind], id)
+      ? [...ledger.deletedDefaultCategories, kind + ":" + id] : ledger.deletedDefaultCategories;
+    return { next: { ...ledger, items, budgets, customCategories, deletedDefaultCategories }, transactionCount, limitCount };
   }
   const hasAccount = (item) => Boolean(item.accountId || item.cardId);
 
@@ -299,7 +331,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categoryDefinitions, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
+  return { categoryDefinitions, deleteCategory, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
 }
 
 const css = `
@@ -900,7 +932,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const searchKey = (value) => value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d");
   const today = localDate();
   let data = initial;
-  let categories = domain.categoryDefinitions(data.customCategories);
+  let categories = domain.categoryDefinitions(data.customCategories, data.deletedDefaultCategories);
   let peopleById = new Map(data.people.map((person) => [person.id, person]));
   let transfersById = indexTransfers(data.items);
   let summaryCache;
@@ -948,9 +980,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   async function persist(next) {
     await native({ action: "save", data: next });
     const itemsChanged = data.items !== next.items;
-    const categoriesChanged = data.customCategories !== next.customCategories;
+    const categoriesChanged = data.customCategories !== next.customCategories || data.deletedDefaultCategories !== next.deletedDefaultCategories;
     data = next;
-    if (categoriesChanged) categories = domain.categoryDefinitions(data.customCategories);
+    if (categoriesChanged) categories = domain.categoryDefinitions(data.customCategories, data.deletedDefaultCategories);
     summaryCache = undefined;
     peopleById = new Map(data.people.map((person) => [person.id, person]));
     if (itemsChanged) transfersById = indexTransfers(data.items);
@@ -1056,8 +1088,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     text("budget-caption", !limits.total ? "Chưa đặt giới hạn."
       : summary.expense > limits.total ? "Vượt " + fmt(summary.expense - limits.total) + " · " + percent + "%"
       : "Còn " + fmt(limits.total - summary.expense) + " · " + percent + "%");
-    $("limits").innerHTML = Object.entries(categories.expense).filter(([key]) =>
-      !isCategoryArchived("expense", key) || limits[key] || summary.spending[key]).map(([key, [name, icon]]) => {
+    $("limits").innerHTML = Object.entries(categories.expense).map(([key, [name, icon]]) => {
       const used = summary.spending[key] || 0;
       const max = limits[key];
       const usage = max ? Math.round(used / max * 100) : 0;
@@ -1500,29 +1531,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   const categoryKey = (kind, id) => kind + ":" + id;
-  const isCategoryArchived = (kind, id) => data.archivedCategories.includes(categoryKey(kind, id));
-
-  function categoryOptions(kind, keep = "") {
-    return Object.entries(categories[kind] || {}).filter(([id]) => id === keep || !isCategoryArchived(kind, id));
-  }
-
   function renderCategories() {
     const nameRow = (name, icon) => glyph(icon) + '<span class="tx-text"><strong>' + enc(name) + '</strong></span>';
     const headings = { expense: "Khoản chi", income: "Khoản thu" };
     $("category-entries").innerHTML = Object.entries(headings).map(([kind, label]) =>
       '<section><h2 class="section-title">' + label + '</h2><div class="group">'
-      + categoryOptions(kind).map(([id, [name, icon]]) => id === "other"
+      + Object.entries(categories[kind]).map(([id, [name, icon]]) => id === "other"
         ? '<div class="tx">' + nameRow(name, icon) + '</div>'
         : '<button class="tx" data-category-key="' + categoryKey(kind, id) + '">' + nameRow(name, icon) + svg("right") + '</button>')
         .join("") + '</div></section>').join("");
-    $("category-archive").hidden = !data.archivedCategories.length;
-    $("archived-category-entries").innerHTML = data.archivedCategories.map((key) => {
-      const [kind, id] = key.split(":");
-      const [name, icon] = categories[kind][id];
-      return '<button class="tx" data-restore-category="' + key + '">' + glyph(icon)
-        + '<span class="tx-text"><strong>' + enc(name) + '</strong><small>' + headings[kind]
-        + '</small></span><span class="restore-person-label">Khôi phục</span></button>';
-    }).join("");
   }
 
   function render() {
@@ -1575,10 +1592,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     for (const button of document.querySelectorAll("[data-type]")) {
       button.setAttribute("aria-pressed", String(button.dataset.type === type));
     }
-    const keep = editing?.type === type ? editing.category : "";
-    const options = categoryOptions(type, keep);
-    $("category").replaceChildren(...options.map(([key, [name]]) =>
-      new Option(name + (isCategoryArchived(type, key) ? " (đã ẩn)" : ""), key)));
+    const options = Object.entries(categories[type]);
+    $("category").replaceChildren(...options.map(([key, [name]]) => new Option(name, key)));
     if (picked && options.some(([key]) => key === picked)) $("category").value = picked;
     const purpose = $("item-purpose").value;
     $("category-field").hidden = Boolean(purpose);
@@ -1964,7 +1979,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("category-name").value = key ? categories[kind][id][0] : "";
     $("category-name").readOnly = fixed;
     $("save-category").hidden = fixed;
-    $("archive-category").hidden = !key;
+    $("delete-category").hidden = !key;
     error("category-error");
     $("category-dialog").showModal();
   }
@@ -1981,7 +1996,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (key && !data.customCategories.some((entry) => entry.id === id)) return;
     if (!name) throw new Error("Nhập tên danh mục.");
     if (Object.entries(categories[kind]).some(([other, [label]]) => other !== id && searchKey(label) === searchKey(name))) {
-      throw new Error("Tên danh mục đã có trong nhóm này. Bạn có thể khôi phục danh mục đã ẩn.");
+      throw new Error("Tên danh mục đã có trong nhóm này.");
     }
     const category = { id, type: kind, name };
     const customCategories = key ? data.customCategories.map((entry) => entry.id === id ? category : entry)
@@ -1990,31 +2005,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("category-dialog").close();
     renderCategories();
   });
-  $("archive-category").onclick = () => {
-    const key = $("category-form").dataset.key;
-    const [kind, id] = key.split(":");
+  $("delete-category").onclick = () => {
+    const [kind, id] = $("category-form").dataset.key.split(":");
+    const before = data;
     const name = categories[kind][id][0];
-    confirm("Ẩn danh mục", "Ẩn " + name + " khỏi danh sách chọn? Giao dịch và ngân sách đã ghi vẫn giữ danh mục này.",
-      "Ẩn danh mục", async () => {
-        await persist({ ...data, archivedCategories: [...data.archivedCategories, key] });
-        $("category-dialog").close();
-        renderCategories();
-        notice("Đã ẩn " + name + ".");
-      });
-  };
-  $("archived-category-entries").onclick = async (event) => {
-    const row = event.target.closest("[data-restore-category]");
-    if (!row) return;
-    const key = row.dataset.restoreCategory;
-    const [kind, id] = key.split(":");
-    row.disabled = true;
-    try {
-      await persist({ ...data, archivedCategories: data.archivedCategories.filter((entry) => entry !== key) });
+    const { next, transactionCount, limitCount } = domain.deleteCategory(before, kind, id);
+    const message = "Xóa danh mục " + name + "?"
+      + (transactionCount ? " " + transactionCount + " giao dịch sẽ chuyển sang Khác." : "")
+      + (limitCount ? " " + limitCount + " hạn mức tháng của danh mục này sẽ bị xóa." : "");
+    confirm("Xóa danh mục", message, "Xóa danh mục", async () => {
+      if (data !== before) throw new Error("Sổ đã thay đổi. Hãy mở lại danh mục để kiểm tra số giao dịch.");
+      await persist(next);
+      $("category-dialog").close();
       renderCategories();
-      $("category-entries").querySelector('[data-category-key="' + key + '"]')?.focus();
-      notice("Đã khôi phục " + categories[kind][id][0] + ".");
-    } catch (err) { notice(err.message); }
-    finally { row.disabled = false; }
+      notice("Đã xóa " + name + ".");
+    });
   };
   $("item-purpose").onchange = () => chooseType(domain.purposes[$("item-purpose").value]?.[1] || type);
   $("purpose-filter").onchange = resetItemResults;
@@ -2100,7 +2105,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (!type) return { category: "other", reason: "Chọn chiều tiền để gợi ý." };
     const key = searchKey(note).replace(/[^a-z0-9]+/g, " ").trim();
     const learned = history.get(type + "|" + key);
-    if (learned && learned !== "other" && !isCategoryArchived(type, learned)) {
+    if (learned && learned !== "other" && categories[type][learned]) {
       return { category: learned, reason: "Theo giao dịch đã phân loại có cùng nội dung." };
     }
     const rules = type === "income" ? [
@@ -2119,7 +2124,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       ["shopping", /\b(?:shopee|lazada|tiki|sieu thi|mua sam)\b/, "mua sắm"],
       ["leisure", /\b(?:cgv|netflix|spotify|rap phim|giai tri)\b/, "giải trí"],
     ];
-    const match = rules.find(([id, expression]) => !isCategoryArchived(type, id) && expression.test(key));
+    const match = rules.find(([id, expression]) => categories[type][id] && expression.test(key));
     if (match) return { category: match[0], reason: "Khớp nội dung liên quan đến " + match[2] + "." };
     if (/\b(?:chuyen noi bo|chuyen giua tai khoan|thu ho|chi ho|cho muon|tra no|thanh toan the)\b/.test(key)) {
       return { category: "other", reason: "Có thể là chuyển tiền, khoản hộ, cho mượn hoặc trả thẻ. Hãy kiểm tra cách ghi sổ." };
@@ -2166,11 +2171,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   function bankCategory(row, select) {
-    const options = categoryOptions(row.type);
+    const options = Object.entries(categories[row.type] || {});
     select.replaceChildren(...options.map(([id, [name]]) => new Option(name, id)));
     if (row.type && !options.some(([id]) => id === row.category)) {
       row.category = "other";
-      row.reason = "Danh mục đã ẩn. Hãy chọn một danh mục đang dùng.";
+      row.reason = "Danh mục đã bị xóa. Bạn có thể chọn một danh mục khác.";
     }
     select.value = row.category;
     select.disabled = !row.type || Boolean(row.purpose);
@@ -2344,7 +2349,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         throw new Error("Kiểm tra dòng ngày " + dateName(row.date) + ": cần chiều tiền, số tiền và người liên quan nếu là khoản hộ hoặc cho mượn.");
       }
       return { id: uid(), type: row.type, amount: row.amount, date: row.date,
-        category: !isCategoryArchived(row.type, row.category) && categories[row.type][row.category] ? row.category : "other", note: row.description.trim(),
+        category: categories[row.type][row.category] ? row.category : "other", note: row.description.trim(),
         importId: row.key, accountId: bankTarget, ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
     });
     if (data.items.length + next.length > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
@@ -8612,10 +8617,6 @@ function page(data, removedUnassigned = 0) {
     </section>
     <section data-page="categories" hidden>
       <div id="category-entries"></div>
-      <details class="group" id="category-archive" hidden>
-        <summary class="summary-line">Danh mục đã ẩn<span class="disclosure-arrow" data-icon="right"></span></summary>
-        <div id="archived-category-entries"></div>
-      </details>
     </section>
     <section data-page="people" hidden>
       <h2 class="section-title">Thành viên và người liên quan</h2>
@@ -8759,7 +8760,7 @@ function page(data, removedUnassigned = 0) {
     <div class="field"><label for="category-name">Tên danh mục</label><input id="category-name" maxlength="80" required></div>
     <p id="category-error" class="error" role="alert" hidden></p>
     <div class="form-actions">
-      <button class="danger" type="button" id="archive-category" hidden>Ẩn danh mục</button>
+      <button class="danger" type="button" id="delete-category" hidden>Xóa danh mục</button>
       <button class="primary" id="save-category">Lưu danh mục</button>
     </div>
   </form>
