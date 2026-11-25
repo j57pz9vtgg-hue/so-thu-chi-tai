@@ -259,7 +259,7 @@ function model() {
       if (importId !== undefined && (typeof importId !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(importId) || imports.has(importId))) invalid();
       if (importId) imports.add(importId);
       if (transferId !== undefined) {
-        if (!validId(transferId) || !accountId || cardId || member || importId
+        if (!validId(transferId) || !accountId || cardId || member
             || (purpose !== "transfer_in" && purpose !== "transfer_out")) invalid();
         const pair = transferPairs.get(transferId) || {};
         if (pair[type]) invalid();
@@ -272,7 +272,7 @@ function model() {
     });
     for (const { expense: from, income: to } of transferPairs.values()) {
       if (!from || !to || from.accountId === to.accountId || from.amount !== to.amount
-          || from.date !== to.date || from.note !== to.note) invalid();
+          || from.date !== to.date || from.note !== to.note || (from.importId && to.importId)) invalid();
     }
     const budgets = {};
     for (const [month, limits] of Object.entries(input.budgets)) {
@@ -955,6 +955,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   let type = "expense";
   let editing = null;
   let editingTransfer = null;
+  let convertingTransfer = null;
   let budgetKey = "total";
   let confirmation;
   let timer;
@@ -1629,7 +1630,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("date").value = item ? item.date : month === today.slice(0,7) ? today : month + "-01";
     $("note").value = item ? item.note : "";
     $("delete").hidden = !item;
-    $("choose-transfer").hidden = Boolean(item) || tab === "cards" || (tab === "transactions" && ledger.startsWith("card:"));
+    const hasSpecialPurpose = item?.purpose && transactionKind(item) !== "transfer";
+    $("choose-transfer").hidden = Boolean(item?.cardId || hasSpecialPurpose) || tab === "cards"
+      || (tab === "transactions" && ledger.startsWith("card:"));
     chooseType(item ? item.type : "expense", item?.category || "");
     error("edit-error");
     $("editor").showModal();
@@ -1677,14 +1680,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     select.value = options.some(([key]) => key === selected) ? selected : "";
   }
 
-  function openTransfer(pair = null) {
+  function openTransfer(pair = null, original = null) {
     editingTransfer = pair;
+    convertingTransfer = original;
     const { expense, income } = pair || {};
-    const from = expense ? itemAccountKey(expense) : $("item-card").value;
-    const to = income ? itemAccountKey(income) : "";
+    const selected = $("item-card").value;
+    const from = expense ? itemAccountKey(expense) : original?.type === "income" ? "" : selected;
+    const to = income ? itemAccountKey(income) : original?.type === "income" ? selected : "";
     transferOptions($("transfer-from"), from, expense && from);
     transferOptions($("transfer-to"), to, income && to);
-    text("transfer-title", pair ? "Sửa chuyển khoản" : "Chuyển khoản");
+    text("transfer-title", pair ? "Sửa chuyển khoản" : original ? "Đổi sang chuyển khoản" : "Chuyển khoản");
+    $("transfer-conversion-note").hidden = !original;
     $("transfer-amount").value = expense ? money.format(expense.amount) : $("amount").value;
     $("transfer-date").value = expense ? expense.date : $("date").value;
     $("transfer-note").value = expense ? expense.note : $("note").value;
@@ -1932,7 +1938,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("delete").onclick = deleteItem;
   $("choose-transfer").onclick = () => {
     $("editor").close();
-    openTransfer();
+    openTransfer(null, editing);
   };
   $("transfer-back").onclick = () => {
     $("amount").value = $("transfer-amount").value;
@@ -1950,14 +1956,19 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (!from || !to || from === to) throw new Error("Chọn hai tài khoản khác nhau.");
     if (!domain.isAmount(amount)) throw new Error("Nhập số tiền VND hợp lệ.");
     if (!domain.validDate(date)) throw new Error("Chọn ngày hợp lệ.");
-    if (!editingTransfer && data.items.length + 2 > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
+    const added = editingTransfer ? 0 : convertingTransfer ? 1 : 2;
+    if (data.items.length + added > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
 
     const transferId = editingTransfer?.expense.transferId || uid();
     const fields = { transferId, amount, date, note, category: "other" };
-    const accountId = (key) => key === "cash" ? key : key.slice(5);
-    const expense = { ...fields, id: editingTransfer?.expense.id || uid(), type: "expense", purpose: "transfer_out", accountId: accountId(from) };
-    const income = { ...fields, id: editingTransfer?.income.id || uid(), type: "income", purpose: "transfer_in", accountId: accountId(to) };
-    const items = data.items.filter((item) => item.transferId !== transferId);
+    const leg = (direction, purpose, key) => {
+      const previous = editingTransfer?.[direction] || (convertingTransfer?.type === direction ? convertingTransfer : null);
+      return { ...fields, id: previous?.id || uid(), type: direction, purpose, accountId: key === "cash" ? key : key.slice(5),
+        ...(previous?.importId ? { importId: previous.importId } : {}) };
+    };
+    const expense = leg("expense", "transfer_out", from);
+    const income = leg("income", "transfer_in", to);
+    const items = data.items.filter((item) => item.transferId !== transferId && item.id !== convertingTransfer?.id);
     await persist({ ...data, items: [...items, expense, income] });
     month = date.slice(0, 7);
     transactionPage = 0;
@@ -2258,21 +2269,25 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   };
   $("remove-bank-imports").onclick = () => {
     const account = bankTarget;
-    const count = bankImportCount(account);
+    const before = data;
+    const imports = before.items.filter((item) => isBankImport(item, account));
+    const count = imports.length;
     if (bankWorking || !count) return;
+    const importedTransfers = new Set(imports.map((item) => item.transferId).filter(Boolean));
     const name = primaryAccountName("bank:" + account);
-    confirm("Xóa giao dịch đã nhập",
-      "Xóa " + count + " giao dịch nhập từ sao kê của " + name
-        + " ở tất cả các tháng? Các giao dịch nhập tay và số dư đầu kỳ bạn đã đặt vẫn được giữ.",
-      "Xóa giao dịch", async () => {
-        const items = data.items.filter((item) => !isBankImport(item, account));
-        await persist({ ...data, items });
-        bankSource = null;
-        bankIdentity();
-        renderBankRows();
-        render();
-        text("bank-import-status", "Đã xóa " + count + " giao dịch. Bạn có thể chọn sao kê mới.");
-      });
+    const message = "Xóa " + count + " giao dịch nhập từ sao kê của " + name
+      + " ở tất cả các tháng? Các giao dịch nhập tay và số dư đầu kỳ bạn đã đặt vẫn được giữ."
+      + (importedTransfers.size ? " Cả hai bên của " + importedTransfers.size + " khoản chuyển liên kết sẽ được gỡ." : "");
+    confirm("Xóa giao dịch đã nhập", message, "Xóa giao dịch", async () => {
+      if (data !== before) throw new Error("Sổ đã thay đổi. Hãy kiểm tra lại số giao dịch đã nhập.");
+      const items = data.items.filter((item) => !isBankImport(item, account) && !importedTransfers.has(item.transferId));
+      await persist({ ...data, items });
+      bankSource = null;
+      bankIdentity();
+      renderBankRows();
+      render();
+      text("bank-import-status", "Đã xóa " + count + " giao dịch. Bạn có thể chọn sao kê mới.");
+    });
   };
   $("pick-bank-file").onclick = () => $("bank-file").click();
   $("bank-file").onchange = async (event) => {
@@ -8703,6 +8718,7 @@ function page(data, removedUnassigned = 0) {
     </div>
     <div class="field"><label for="transfer-note">Ghi chú</label><textarea id="transfer-note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
     <p class="empty">Khoản chuyển cập nhật số dư hai tài khoản và nằm ngoài tổng thu chi.</p>
+    <p class="empty" id="transfer-conversion-note" hidden>Khi lưu, khoản chuyển sẽ thay giao dịch cũ. Danh mục và người liên quan của giao dịch cũ sẽ được gỡ.</p>
     <p id="transfer-error" class="error" role="alert" hidden></p>
     <div class="form-actions">
       <button class="secondary" type="button" id="transfer-back">Quay lại Thu/Chi</button>
