@@ -486,11 +486,12 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .filter-toggle.is-active, #transaction-filters[open] .filter-toggle { background: var(--mint); }
 .filter-fields { padding: 12px; margin-top: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
 .filters, .types {
-  display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); border: 1px solid var(--line);
+  display: grid; grid-template-columns: repeat(3, minmax(0,1fr)) minmax(105px,1.4fr); border: 1px solid var(--line);
   border-radius: 11px; overflow: hidden; margin: 13px 0 0;
 }
 .types { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 1fr; margin: 0 0 15px; }
 .filter, .type-choice { min-height: 44px; padding: 0 9px; font-size: 14px; font-weight: 650; }
+.filter[data-filter="transfer"] { padding-inline: 4px; white-space: nowrap; }
 .filter + .filter, .type-choice + .type-choice { border-left: 1px solid var(--line); }
 .filter:focus-visible, .type-choice:focus-visible { outline-offset: -3px; }
 .filter[aria-pressed=true], .type-choice[aria-pressed=true], .primary { background: var(--dark); color: #fff; }
@@ -1054,13 +1055,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         + '</div><span>' + percent + '%</span><strong>' + fmt(amount) + '</strong></div>';
     }).join("") || '<p class="empty">Chưa có khoản chi trong tháng này.</p>';
   }
+  function transactionKind(item) {
+    return item.purpose === "transfer_in" || item.purpose === "transfer_out" ? "transfer" : item.type;
+  }
+
   function renderItems(summary) {
     const query = searchKey($("query").value.trim());
     const member = $("member-filter").value;
-    const purpose = $("purpose-filter").value;
+    const category = $("category-filter").value;
     const entries = itemsInLedger(ledger, summary.items, month);
-    const results = entries.filter((item) => (filter === "all" || filter === item.type)
-      && (purpose === "all" || (item.purpose || "") === purpose)
+    const results = entries.filter((item) => (filter === "all" || filter === transactionKind(item))
+      && (!category || (!item.purpose && !item.credit && category === categoryKey(item.type, item.category)))
       && (!member || (item.member || "unassigned") === member)
       && searchKey(item.note + " " + (item.credit ? creditLabel(item.credit) : transactionLabel(item))
         + " " + personName(item.member)).includes(query));
@@ -1068,7 +1073,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
     $("items").innerHTML = rows(results.slice(start, start + TRANSACTION_PAGE_SIZE), "Không tìm thấy giao dịch.");
-    $("filter-toggle").classList.toggle("is-active", Boolean(member || purpose !== "all"));
+    $("filter-toggle").classList.toggle("is-active", Boolean(member || category));
     $("transaction-paging").hidden = pages <= 1;
     $("transaction-prev").disabled = transactionPage === 0;
     $("transaction-next").disabled = transactionPage + 1 === pages;
@@ -1805,8 +1810,26 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("previous").onclick = () => stepMonth(-1);
   $("next").onclick = () => stepMonth(1);
   $("add").onclick = () => openEditor();
+  function updateCategoryFilter() {
+    const select = $("category-filter");
+    const selected = select.value;
+    const kinds = filter === "all" ? ["expense", "income"] : filter === "transfer" ? [] : [filter];
+    $("category-filter-field").hidden = !kinds.length;
+    select.replaceChildren(new Option("Tất cả danh mục", ""));
+    for (const kind of kinds) {
+      const group = document.createElement("optgroup");
+      group.label = kind === "expense" ? "Khoản chi" : "Khoản thu";
+      for (const [id, [name]] of Object.entries(categories[kind])) {
+        group.append(new Option(name, categoryKey(kind, id)));
+      }
+      select.append(group);
+    }
+    select.value = [...select.options].some((option) => option.value === selected) ? selected : "";
+  }
+
   function setTransactionType(selection) {
     filter = selection;
+    updateCategoryFilter();
     for (const button of document.querySelectorAll("[data-filter]")) {
       button.setAttribute("aria-pressed", String(button.dataset.filter === filter));
     }
@@ -1818,7 +1841,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       selectedClosing = "";
     }
     $("query").value = "";
-    $("purpose-filter").value = "all";
+    $("category-filter").value = "";
     $("member-filter").value = "";
     $("transaction-filters").open = false;
     transactionPage = 0;
@@ -2022,7 +2045,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     });
   };
   $("item-purpose").onchange = () => chooseType(domain.purposes[$("item-purpose").value]?.[1] || type);
-  $("purpose-filter").onchange = resetItemResults;
+  $("category-filter").onchange = resetItemResults;
   function openPerson(id = "") {
     const person = peopleById.get(id);
     const fixed = Boolean(id && !person);
@@ -2086,7 +2109,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   });
   for (const [value, [label]] of Object.entries(domain.purposes)) {
     $("item-purpose").add(new Option(label, value));
-    $("purpose-filter").add(new Option(label, value));
   }
   refreshPeople();
   const BANK_PAGE_SIZE = 20;
@@ -8524,7 +8546,7 @@ function page(data, removedUnassigned = 0) {
         <details id="transaction-filters">
           <summary class="filter-toggle" id="filter-toggle"><span data-icon="funnel"></span>Bộ lọc</summary>
           <div class="filter-fields">
-            <div class="field"><label for="purpose-filter">Cách ghi sổ</label><select id="purpose-filter"><option value="all">Tất cả</option><option value="">Thu chi bằng tiền</option></select></div>
+            <div class="field" id="category-filter-field"><label for="category-filter">Danh mục</label><select id="category-filter"><option value="">Tất cả danh mục</option></select></div>
             <div class="field"><label for="member-filter">Thành viên / người liên quan</label><select id="member-filter"><option value="">Cả gia đình</option><option value="unassigned">Chưa phân loại</option></select></div>
           </div>
         </details>
@@ -8533,6 +8555,7 @@ function page(data, removedUnassigned = 0) {
         <button class="filter" data-filter="all" aria-pressed="true">Tất cả</button>
         <button class="filter" data-filter="income" aria-pressed="false">Thu</button>
         <button class="filter" data-filter="expense" aria-pressed="false">Chi</button>
+        <button class="filter" data-filter="transfer" aria-pressed="false">Chuyển khoản</button>
       </div>
       <div id="items" class="ledger"></div>
       <div class="bank-paging" id="transaction-paging" hidden>
