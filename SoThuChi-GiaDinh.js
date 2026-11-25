@@ -200,6 +200,12 @@ function model() {
       personIds.add(person.id);
       return { id: person.id, name: person.name, family: person.family };
     });
+    const archived = new Set();
+    const archivedPeople = list(input.archivedPeople, 254).map((id) => {
+      if (typeof id !== "string" || id === "shared" || archived.has(id) || (!own(members, id) && !personIds.has(id))) invalid();
+      archived.add(id);
+      return id;
+    });
     const imports = new Set();
     const ids = new Set();
     const items = input.items.map((item) => {
@@ -229,7 +235,7 @@ function model() {
         budgets[month][key] = amount;
       }
     }
-    return { version: 1, items, budgets, cards, savings, people, accounts, openings };
+    return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople };
   }
   function parseBackup(raw) {
     if (typeof raw !== "string" || raw.length > maxBackup) invalid();
@@ -484,6 +490,7 @@ dialog::backdrop { background: #15201a78; }
 }
 .detail strong, .family-line small { text-align: right; }
 .family-line small { color: var(--muted); font-size: 13px; }
+.restore-person-label { color: var(--dark); font-size: 13px; font-weight: 700; }
 #remove-closing { margin-top: 12px; }
 .saving-total { display: block; margin: 5px 0 0; font-size: clamp(23px, 7vw, 35px); color: var(--dark); overflow-wrap: anywhere; }
 .card-summary { margin: 12px 0 0; padding: 14px; }
@@ -842,7 +849,7 @@ function webApp(initial, getModel, getStatementReader) {
   let bankTarget = "";
   let editorAccount = "";
   const pageTitles = {
-    overview: "Sổ Thu Chi", transactions: "Giao dịch", "account-list": "Tài khoản", accounts: "Sổ tiền",
+    overview: "Sổ Thu Chi", transactions: "Giao dịch", "account-list": "Tài khoản", accounts: "Cài đặt",
     budget: "Ngân sách", cards: "Thẻ tín dụng", savings: "Tiết kiệm",
     people: "Gia đình", backup: "Sao lưu dữ liệu",
   };
@@ -1004,23 +1011,31 @@ function webApp(initial, getModel, getStatementReader) {
   const personName = (id) => Object.prototype.hasOwnProperty.call(domain.members, id)
     ? domain.members[id] : peopleById.get(id)?.name || "";
   const transactionLabel = (item) => item.purpose ? domain.purposes[item.purpose][0] : categories[item.type][item.category][0];
-  const personOptions = () => [...Object.entries(domain.members), ...data.people.map((person) => [person.id, person.name])];
+  const isArchived = (id) => data.archivedPeople.includes(id);
+  function personOptions(includeArchived = false, keep = "") {
+    return [...Object.entries(domain.members), ...data.people.map((person) => [person.id, person.name])]
+      .filter(([id]) => includeArchived || id === keep || !isArchived(id));
+  }
   const relatedPurpose = (purpose) => /^(loan|proxy)_/.test(purpose);
 
   function refreshPeople() {
     const selection = $("member-filter").value;
     $("member-filter").replaceChildren(new Option("Tất cả", ""), new Option("Chưa phân loại", "unassigned"),
-      ...personOptions().map(([id, name]) => new Option(name, id)));
-    $("member-filter").value = selection || "";
+      ...personOptions(true).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
+    $("member-filter").value = [...$("member-filter").options].some((option) => option.value === selection) ? selection : "";
   }
 
   function renderPeople() {
-    const builtIn = Object.values(domain.members).map((name) =>
-      '<div class="tx">' + glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong></span></div>');
-    const custom = data.people.map((person) =>
-      '<button class="tx" data-person="' + person.id + '">' + glyph("person") + '<span class="tx-text"><strong>' + enc(person.name)
-      + '</strong><small>' + (person.family ? 'Thành viên gia đình' : 'Người liên quan') + '</small></span>' + svg("right") + '</button>');
-    $("people-list").innerHTML = [...builtIn, ...custom].join("");
+    const nameRow = (id, name) => glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong>'
+      + (peopleById.has(id) ? '<small>' + (peopleById.get(id).family ? 'Thành viên gia đình' : 'Người liên quan') + '</small>' : '')
+      + '</span>';
+    $("people-list").innerHTML = personOptions().map(([id, name]) => id === "shared"
+      ? '<div class="tx">' + nameRow(id, name) + '</div>'
+      : '<button class="tx" data-person="' + id + '">' + nameRow(id, name) + svg("right") + '</button>').join("");
+    $("people-archive").hidden = !data.archivedPeople.length;
+    $("archived-people-list").innerHTML = personOptions(true).filter(([id]) => isArchived(id)).map(([id, name]) =>
+      '<button class="tx" data-restore-person="' + id + '">' + nameRow(id, name)
+      + '<span class="restore-person-label">Khôi phục</span></button>').join("");
     const totals = new Map();
     let vouchers = 0;
     for (const item of data.items) {
@@ -1050,7 +1065,8 @@ function webApp(initial, getModel, getStatementReader) {
       current[item.type] += item.amount;
       totals.set(key, current);
     }
-    $("family-summary").innerHTML = [...personOptions(), ["unassigned", "Chưa phân loại"]].map(([key, name]) => {
+    const people = personOptions(true).filter(([id]) => !isArchived(id) || totals.has(id));
+    $("family-summary").innerHTML = [...people, ["unassigned", "Chưa phân loại"]].map(([key, name]) => {
       const { income = 0, expense = 0 } = totals.get(key) || {};
       return '<div class="family-line"><strong>' + enc(name) + '</strong><small>Thu ' + fmt(income)
         + ' · Chi ' + fmt(expense) + '</small></div>';
@@ -1450,7 +1466,7 @@ function webApp(initial, getModel, getStatementReader) {
     if (editorAccount === "unassigned") editorAccount = "";
     $("item-card").replaceChildren();
     $("item-member").replaceChildren(new Option("Chưa phân loại", ""),
-      ...personOptions().map(([id, name]) => new Option(name, id)));
+      ...personOptions(false, item?.member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
     $("item-member").value = item && item.member || "";
     $("item-purpose").value = item && item.purpose || "";
     $("editor-options").open = Boolean(item && (item.purpose || item.member || item.cardId
@@ -1697,28 +1713,62 @@ function webApp(initial, getModel, getStatementReader) {
   $("item-card").onchange = () => { editorAccount = $("item-card").value; };
   $("item-purpose").onchange = () => chooseType(domain.purposes[$("item-purpose").value]?.[1] || type);
   $("purpose-filter").onchange = resetItemResults;
-  function openPerson(person) {
-    $("person-form").dataset.id = person ? person.id : "";
-    $("person-name").value = person ? person.name : "";
+  function openPerson(id = "") {
+    const person = peopleById.get(id);
+    const fixed = Boolean(id && !person);
+    text("person-title", id ? "Thông tin người liên quan" : "Thêm người");
+    $("person-form").dataset.id = id;
+    $("person-name").value = id ? personName(id) : "";
+    $("person-name").readOnly = fixed;
     $("person-kind").value = person && !person.family ? "other" : "family";
+    $("person-kind-field").hidden = fixed;
+    $("person-save").hidden = fixed;
+    $("person-remove").hidden = !id;
     error("person-error");
     $("person-dialog").showModal();
   }
   $("new-person").onclick = () => openPerson();
   $("people-list").onclick = (event) => {
     const entry = event.target.closest("[data-person]");
-    if (entry) openPerson(data.people.find((person) => person.id === entry.dataset.person));
+    if (entry) openPerson(entry.dataset.person);
+  };
+  $("person-remove").onclick = () => {
+    const id = $("person-form").dataset.id;
+    const name = personName(id);
+    confirm("Bỏ khỏi danh sách", "Bỏ " + name + " khỏi danh sách chọn? Các giao dịch đã ghi vẫn giữ tên này.",
+      "Bỏ khỏi danh sách", async () => {
+        await persist({ ...data, archivedPeople: [...data.archivedPeople, id] });
+        refreshPeople();
+        $("person-dialog").close();
+        renderPeople();
+        notice("Đã bỏ " + name + " khỏi danh sách.");
+      });
+  };
+  $("archived-people-list").onclick = async (event) => {
+    const entry = event.target.closest("[data-restore-person]");
+    if (!entry) return;
+    const id = entry.dataset.restorePerson;
+    entry.disabled = true;
+    try {
+      await persist({ ...data, archivedPeople: data.archivedPeople.filter((value) => value !== id) });
+      refreshPeople();
+      renderPeople();
+      $("people-list").querySelector('[data-person="' + id + '"]')?.focus();
+      notice("Đã khôi phục " + personName(id) + ".");
+    } catch (err) { notice(err.message); }
+    finally { entry.disabled = false; }
   };
   asyncForm("person-form", "person-error", async () => {
     const name = $("person-name").value.trim();
-    const id = $("person-form").dataset.id || uid();
+    const activeId = $("person-form").dataset.id;
+    if (activeId && !peopleById.has(activeId)) return;
+    const id = activeId || uid();
     if (!name) throw new Error("Nhập tên người liên quan.");
-    if (personOptions().some(([other, label]) => other !== id && searchKey(label) === searchKey(name))) {
-      throw new Error("Tên này đã có trong danh sách.");
+    if (personOptions(true).some(([other, label]) => other !== id && searchKey(label) === searchKey(name))) {
+      throw new Error("Tên này đã có. Nếu đã bỏ khỏi danh sách, hãy khôi phục người đó.");
     }
     const person = { id, name, family: $("person-kind").value === "family" };
-    const people = data.people.some((entry) => entry.id === id)
-      ? data.people.map((entry) => entry.id === id ? person : entry) : [...data.people, person];
+    const people = activeId ? data.people.map((entry) => entry.id === id ? person : entry) : [...data.people, person];
     await persist({ ...data, people });
     refreshPeople();
     $("person-dialog").close();
@@ -1813,6 +1863,7 @@ function webApp(initial, getModel, getStatementReader) {
     select.disabled = !row.type || Boolean(row.purpose);
   }
   function renderBankRows() {
+    for (const row of bankRows) if (isArchived(row.member)) row.member = "";
     const selected = bankRows.reduce((sum, row) => sum + Number(row.selected && !row.duplicate), 0);
     text("bank-selected", selected + " / " + bankRows.length + " dòng đã chọn");
     $("bank-save").disabled = bankWorking || !selected;
@@ -8075,7 +8126,7 @@ function page(data) {
 </head>
 <body>
 <div class="shell" id="page-shell">
-  <button class="back" id="account-back" data-tab="accounts" aria-label="Quay về Sổ tiền" hidden><span data-icon="left"></span>Sổ tiền</button>
+  <button class="back" id="account-back" data-tab="accounts" aria-label="Quay về Cài đặt" hidden><span data-icon="left"></span>Cài đặt</button>
   <button class="back" id="ledger-back" data-tab="account-list" aria-label="Quay về Tài khoản" hidden><span data-icon="left"></span>Tài khoản</button>
   <header class="page-header">
     <h1 id="page-title" tabindex="-1">Sổ Thu Chi</h1>
@@ -8214,6 +8265,10 @@ function page(data) {
     <section data-page="people" hidden>
       <h2 class="section-title">Thành viên và người liên quan</h2>
       <div class="group" id="people-list"></div>
+      <details class="group" id="people-archive" hidden>
+        <summary class="summary-line">Thành viên đã bỏ<span class="disclosure-arrow" data-icon="right"></span></summary>
+        <div id="archived-people-list"></div>
+      </details>
       <details class="group">
         <summary class="summary-line">Cho mượn và thu chi hộ<span class="disclosure-arrow" data-icon="right"></span></summary>
         <div class="report-content" id="people-balances"></div>
@@ -8227,7 +8282,7 @@ function page(data) {
   <nav aria-label="Điều hướng">
     <button data-tab="overview"><span data-icon="home"></span>Trang chủ</button>
     <button data-tab="account-list"><span data-icon="bank"></span>Tài khoản</button>
-    <button data-tab="accounts"><span data-icon="wallet"></span>Sổ tiền</button>
+    <button data-tab="accounts"><span data-icon="wallet"></span>Cài đặt</button>
   </nav>
 </div>
 <dialog id="editor" aria-labelledby="editor-title">
@@ -8315,8 +8370,12 @@ function page(data) {
   <div class="dialog-heading"><h2 id="person-title">Thông tin người liên quan</h2><button data-close="person-dialog" aria-label="Đóng" data-icon="x"></button></div>
   <form id="person-form">
     <div class="field"><label for="person-name">Tên gọi</label><input id="person-name" maxlength="80" required></div>
-    <div class="field"><label for="person-kind">Nhóm</label><select id="person-kind"><option value="family">Gia đình</option><option value="other">Người khác</option></select></div>
-    <p id="person-error" class="error" role="alert" hidden></p><button class="primary">Lưu người</button>
+    <div class="field" id="person-kind-field"><label for="person-kind">Nhóm</label><select id="person-kind"><option value="family">Gia đình</option><option value="other">Người khác</option></select></div>
+    <p id="person-error" class="error" role="alert" hidden></p>
+    <div class="form-actions">
+      <button class="danger" type="button" id="person-remove" hidden>Bỏ khỏi danh sách</button>
+      <button class="primary" id="person-save">Lưu người</button>
+    </div>
   </form>
 </dialog>
 <dialog id="card-dialog" aria-labelledby="card-title">
