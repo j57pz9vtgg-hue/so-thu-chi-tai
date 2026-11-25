@@ -184,6 +184,12 @@ function model() {
     });
     const accountKeys = new Set(["cash", ...accounts.map((account) => "bank:" + account.id),
       ...cards.map((card) => "card:" + card.id)]);
+    const archivedAccountKeys = new Set();
+    const archivedAccounts = list(input.archivedAccounts, accountKeys.size).map((key) => {
+      if (!accountKeys.has(key) || archivedAccountKeys.has(key)) invalid();
+      archivedAccountKeys.add(key);
+      return key;
+    });
     const openingKeys = new Set();
     const openings = list(input.openings, maxRows).map((entry) => {
       if (!object(entry) || !accountKeys.has(entry.key) || !validMonth(entry.month)
@@ -235,7 +241,7 @@ function model() {
         budgets[month][key] = amount;
       }
     }
-    return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople };
+    return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople, archivedAccounts };
   }
   function parseBackup(raw) {
     if (typeof raw !== "string" || raw.length > maxBackup) invalid();
@@ -382,6 +388,8 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .bar { height: 8px; border-radius: 20px; background: #e9e6df; overflow: hidden; }
 .bar span { display: block; height: 100%; border-radius: 20px; background: #327657; }
 .period-summary { margin: 0 0 14px; padding-bottom: 4px; }
+.period-actions { display: flex; flex-wrap: wrap; justify-content: space-between; column-gap: 12px; }
+.text-button.muted-button { color: var(--muted); }
 .period-values { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
 .period-values > div + div { border-left: 1px solid var(--line); padding-left: 10px; }
 .period-values dt { color: var(--muted); font-size: 13px; }
@@ -845,15 +853,15 @@ function webApp(initial, getModel, getStatementReader) {
   const TRANSACTION_PAGE_SIZE = 50;
   let month = today.slice(0, 7);
   let tab = "overview";
-  let ledger = "all";
+  let ledger = "cash";
   let bankTarget = "";
   let editorAccount = "";
   const pageTitles = {
     overview: "Sổ Thu Chi", transactions: "Giao dịch", "account-list": "Tài khoản", accounts: "Cài đặt",
     budget: "Ngân sách", cards: "Thẻ tín dụng", savings: "Tiết kiệm",
-    people: "Gia đình", backup: "Sao lưu dữ liệu",
+    people: "Gia đình", backup: "Sao lưu dữ liệu", "archived-accounts": "Tài khoản đã ẩn",
   };
-  const accountPages = new Set(["budget", "cards", "savings", "people", "backup"]);
+  const accountPages = new Set(["budget", "cards", "savings", "people", "backup", "archived-accounts"]);
   const pageActions = { "account-list": "new-account", transactions: "open-bank", cards: "new-card", savings: "new-saving", people: "new-person" };
   let filter = "all";
   let type = "expense";
@@ -933,9 +941,7 @@ function webApp(initial, getModel, getStatementReader) {
         ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
       day = item.date;
       const title = item.credit ? name : (item.note || name);
-      const source = itemAccountKey(item);
-      const subtitle = [item.credit ? item.note : name,
-        item.member && personName(item.member), ledger === "all" && source !== "unassigned" && ledgerName(source)]
+      const subtitle = [item.credit ? item.note : name, item.member && personName(item.member)]
         .filter(Boolean).join(" · ");
       const action = item.credit ? 'data-edit-credit' : 'data-edit';
       return header + '<button class="tx" ' + action + '="' + item.id + '">' + glyph(item.credit ? "card" : icon, item.category)
@@ -959,7 +965,7 @@ function webApp(initial, getModel, getStatementReader) {
     const query = searchKey($("query").value.trim());
     const member = $("member-filter").value;
     const purpose = $("purpose-filter").value;
-    const entries = ledger === "all" ? summary.items : itemsInLedger(ledger, summary.items, month);
+    const entries = itemsInLedger(ledger, summary.items, month);
     const results = entries.filter((item) => (filter === "all" || filter === item.type)
       && (purpose === "all" || (item.purpose || "") === purpose)
       && (!member || (item.member || "unassigned") === member)
@@ -1080,6 +1086,9 @@ function webApp(initial, getModel, getStatementReader) {
     $("card-empty").hidden = Boolean(card);
     if (!card) return;
     cardId = card.id;
+    const archived = isAccountArchived("card:" + cardId);
+    $("card-purchase").hidden = archived;
+    $("add-credit").hidden = archived;
     $("card-select").value = cardId;
     const latest = card.closings.slice().sort().reverse();
     if (!latest.includes(selectedClosing)) selectedClosing = latest[0] || "";
@@ -1269,7 +1278,7 @@ function webApp(initial, getModel, getStatementReader) {
       cardId = card.id;
       selectedClosing = "";
       $("card-dialog").close();
-      renderCards();
+      render();
     });
     asyncForm("closing-form", "close-error", async () => {
       const card = activeCard();
@@ -1332,15 +1341,13 @@ function webApp(initial, getModel, getStatementReader) {
   }
 
   function ledgerName(key) {
-    if (key === "all") return "Tất cả giao dịch";
-    if (key === "unassigned") return "Chưa gán tài khoản";
     if (key.startsWith("card:")) return data.cards.find((card) => card.id === key.slice(5))?.name || "";
     return primaryAccountName(key);
   }
 
   function itemAccountKey(item) {
     if (item.cardId) return "card:" + item.cardId;
-    if (!item.accountId) return "unassigned";
+    if (!item.accountId) return "";
     return item.accountId === "cash" ? "cash" : "bank:" + item.accountId;
   }
 
@@ -1355,26 +1362,45 @@ function webApp(initial, getModel, getStatementReader) {
     return selectedMonth ? rows.sort((left, right) => right.date.localeCompare(left.date)) : rows;
   }
 
+  const isAccountArchived = (key) => data.archivedAccounts.includes(key);
+  const hasAccount = (item) => Boolean(item.accountId || item.cardId);
+
+  function accountRows() {
+    return [
+      ["cash", "wallet", "Giao dịch bằng tiền mặt"],
+      ...data.accounts.map((account) => ["bank:" + account.id, "bank", "Tài khoản ngân hàng"]),
+      ...data.cards.map((card) => ["card:" + card.id, "card", "Thẻ tín dụng"]),
+    ];
+  }
+
   function renderAccountList() {
-    const row = (key, icon, subtitle) => '<button class="menu-row" data-ledger="' + key + '">' + glyph(icon)
+    $("account-entries").innerHTML = accountRows().filter(([key]) => !isAccountArchived(key)).map(([key, icon, subtitle]) =>
+      '<button class="menu-row" data-ledger="' + key + '">' + glyph(icon)
       + '<span class="tx-text"><strong>' + enc(ledgerName(key)) + '</strong><small>' + subtitle + '</small></span>'
-      + svg("right") + '</button>';
-    $("account-entries").innerHTML = [
-      row("cash", "wallet", "Giao dịch bằng tiền mặt"),
-      ...data.accounts.map((account) => row("bank:" + account.id, "bank", "Tài khoản ngân hàng")),
-      ...data.cards.map((card) => row("card:" + card.id, "card", "Thẻ tín dụng")),
-      row("unassigned", "list", "Giao dịch chưa được gán vào tài khoản"),
-      row("all", "list", "Tra cứu các khoản đã ghi"),
-    ].join("");
+      + svg("right") + '</button>').join("")
+      || '<p class="empty">Chưa có tài khoản đang dùng.</p>';
+  }
+
+  function renderArchivedAccounts() {
+    $("archived-account-entries").innerHTML = accountRows().filter(([key]) => isAccountArchived(key)).map(([key, icon, subtitle]) =>
+      '<button class="menu-row" data-restore-ledger="' + key + '">' + glyph(icon)
+      + '<span class="tx-text"><strong>' + enc(ledgerName(key)) + '</strong><small>' + subtitle + '</small></span>'
+      + '<span class="restore-person-label">Khôi phục</span></button>').join("")
+      || '<p class="empty">Chưa có tài khoản đã ẩn.</p>';
+  }
+
+  function renderSettings() {
+    const remaining = data.items.reduce((count, item) => count + (hasAccount(item) ? 0 : 1), 0);
+    $("remove-unassigned").hidden = !remaining;
+    text("unassigned-count", remaining + " giao dịch cần xử lý");
+    $("open-archived-accounts").hidden = !data.archivedAccounts.length;
+    $("account-maintenance").hidden = !remaining && !data.archivedAccounts.length;
   }
 
   function renderPeriod() {
     const card = ledger.startsWith("card:");
     const anchor = domain.latestOpening(data.openings, ledger, month);
-    const allowed = ledger !== "all" && ledger !== "unassigned";
-    $("period").hidden = !allowed;
     $("ledger-credit").hidden = !card;
-    if (!allowed) return;
     text("period-opening-label", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
     text("period-ending-label", card ? "Dư nợ cuối kỳ" : "Số dư cuối kỳ");
     let opening = anchor ? anchor.amount : 0;
@@ -1402,6 +1428,8 @@ function webApp(initial, getModel, getStatementReader) {
     if (tab === "cards") return renderCards();
     if (tab === "savings") return renderSavings();
     if (tab === "account-list") return renderAccountList();
+    if (tab === "accounts") return renderSettings();
+    if (tab === "archived-accounts") return renderArchivedAccounts();
     const summary = stats();
     text("month-label", monthName(month));
     $("previous").disabled = month === "1900-01";
@@ -1419,7 +1447,7 @@ function webApp(initial, getModel, getStatementReader) {
     $("account-back").hidden = !nested;
     $("ledger-back").hidden = tab !== "transactions";
     for (const [page, button] of Object.entries(pageActions)) $(button).hidden = page !== tab;
-    if (tab === "transactions") $("open-bank").hidden = ledger !== "all" && !ledger.startsWith("bank:");
+    if (tab === "transactions") $("open-bank").hidden = !ledger.startsWith("bank:");
     $("add").hidden = !showAdd;
     $("page-shell").classList.toggle("with-fab", showAdd);
     $("toast").hidden = true;
@@ -1449,28 +1477,26 @@ function webApp(initial, getModel, getStatementReader) {
     const purpose = $("item-purpose").value;
     $("category-field").hidden = Boolean(purpose);
     const account = $("item-card");
-    const previous = account.value;
+    const selection = account.options.length ? account.value : editorAccount;
     const allowCard = type === "expense" && !purpose;
-    account.replaceChildren(new Option("Chưa gán tài khoản", ""), new Option("Tiền mặt", "cash"),
-      ...data.accounts.map((entry) => new Option(entry.name, "bank:" + entry.id)),
-      ...(allowCard ? data.cards.map((entry) => new Option(entry.name, "card:" + entry.id)) : []));
-    const selection = previous || editorAccount;
-    account.value = [...account.options].some((option) => option.value === selection)
-      ? selection : ledger.startsWith("card:") ? "cash" : "";
-    editorAccount = account.value;
+    const original = editing && itemAccountKey(editing);
+    const usable = accountRows().filter(([key]) => (!key.startsWith("card:") || allowCard)
+      && (!isAccountArchived(key) || key === original));
+    account.replaceChildren(new Option("Chọn tài khoản", ""), ...usable.map(([key]) =>
+      new Option(ledgerName(key) + (isAccountArchived(key) ? " (đã ẩn)" : ""), key)));
+    if (usable.some(([key]) => key === selection)) account.value = selection;
     for (const button of document.querySelectorAll("[data-type]")) button.disabled = Boolean(purpose);
   }
   function openEditor(item = null) {
     editing = item;
-    editorAccount = item ? itemAccountKey(item) : tab === "transactions" && ledger !== "all" ? ledger : "cash";
-    if (editorAccount === "unassigned") editorAccount = "";
+    editorAccount = item ? itemAccountKey(item)
+      : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
     $("item-card").replaceChildren();
     $("item-member").replaceChildren(new Option("Chưa phân loại", ""),
       ...personOptions(false, item?.member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
     $("item-member").value = item && item.member || "";
     $("item-purpose").value = item && item.purpose || "";
-    $("editor-options").open = Boolean(item && (item.purpose || item.member || item.cardId
-      || (tab === "transactions" && ledger === "unassigned")));
+    $("editor-options").open = !editorAccount || Boolean(item && (item.purpose || item.member || item.cardId));
     text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
     $("amount").value = item ? money.format(item.amount) : "";
     $("date").value = item ? item.date : month === today.slice(0,7) ? today : month + "-01";
@@ -1496,6 +1522,12 @@ function webApp(initial, getModel, getStatementReader) {
     }
     if (purpose) item.purpose = purpose;
     const source = $("item-card").value;
+    if (!source) {
+      $("editor-options").open = true;
+      $("item-card").focus();
+      return error("edit-error", accountRows().some(([key]) => !isAccountArchived(key))
+        ? "Chọn tài khoản phù hợp cho giao dịch." : "Thêm hoặc khôi phục tài khoản trước khi ghi giao dịch.");
+    }
     if (source.startsWith("card:")) item.cardId = source.slice(5);
     else if (source) item.accountId = source === "cash" ? source : source.slice(5);
     if (editing && editing.importId) item.importId = editing.importId;
@@ -1634,15 +1666,51 @@ function webApp(initial, getModel, getStatementReader) {
     go("transactions");
   }
   $("ledger-credit").onclick = () => { cardId = ledger.slice(5); openCredit(); };
+  $("account-archive").onclick = () => {
+    const key = ledger;
+    const name = ledgerName(key);
+    confirm("Ẩn tài khoản", "Ẩn " + name + " khỏi tab Tài khoản? Lịch sử và số dư vẫn được lưu.",
+      "Ẩn tài khoản", async () => {
+        await persist({ ...data, archivedAccounts: [...data.archivedAccounts, key] });
+        go("account-list");
+        notice("Đã ẩn " + name + ".");
+      });
+  };
+  $("archived-account-entries").onclick = async (event) => {
+    const button = event.target.closest("[data-restore-ledger]");
+    if (!button) return;
+    const key = button.dataset.restoreLedger;
+    button.disabled = true;
+    try {
+      await persist({ ...data, archivedAccounts: data.archivedAccounts.filter((entry) => entry !== key) });
+      go("account-list");
+      notice("Đã khôi phục " + ledgerName(key) + ".");
+    } catch (err) { notice(err.message); }
+    finally { button.disabled = false; }
+  };
+  $("remove-unassigned").onclick = () => {
+    const count = data.items.reduce((total, item) => total + (hasAccount(item) ? 0 : 1), 0);
+    if (!count) return;
+    confirm("Xóa giao dịch chưa gán", "Xóa vĩnh viễn " + count + " giao dịch chưa có tài khoản? "
+      + "Các giao dịch đã gán tài khoản vẫn được giữ.", "Xóa giao dịch", async () => {
+        await persist({ ...data, items: data.items.filter(hasAccount) });
+        renderSettings();
+        notice("Đã xóa " + count + " giao dịch chưa gán.");
+      });
+  };
   $("new-account").onclick = () => {
     $("account-name").value = "";
     error("account-error");
     $("account-dialog").showModal();
   };
+  $("account-add-card").onclick = () => {
+    $("account-dialog").close();
+    openCard();
+  };
   asyncForm("account-form", "account-error", async () => {
     const name = $("account-name").value.trim();
     if (!name) throw new Error("Nhập tên tài khoản.");
-    if (["Tiền mặt", "Chưa gán tài khoản", "Tất cả giao dịch", ...data.accounts.map((entry) => entry.name)]
+    if (["Tiền mặt", ...data.accounts.map((entry) => entry.name)]
       .some((entry) => searchKey(entry.trim()) === searchKey(name))) throw new Error("Tên tài khoản đã có.");
     const account = { id: uid(), name };
     await persist({ ...data, accounts: [...data.accounts, account] });
@@ -1710,7 +1778,6 @@ function webApp(initial, getModel, getStatementReader) {
     try { await saveLimit(budgetKey, $("category-limit").value); $("limit-dialog").close(); }
     catch (err) { error("limit-error", err.message); }
   };
-  $("item-card").onchange = () => { editorAccount = $("item-card").value; };
   $("item-purpose").onchange = () => chooseType(domain.purposes[$("item-purpose").value]?.[1] || type);
   $("purpose-filter").onchange = resetItemResults;
   function openPerson(id = "") {
@@ -1893,7 +1960,7 @@ function webApp(initial, getModel, getStatementReader) {
   }
 
   $("open-bank").onclick = () => {
-    const next = ledger.startsWith("bank:") ? ledger.slice(5) : "";
+    const next = ledger.slice(5);
     if (bankTarget !== next) {
       bankTarget = next;
       bankReadGeneration++;
@@ -2009,7 +2076,7 @@ function webApp(initial, getModel, getStatementReader) {
       }
       return { id: uid(), type: row.type, amount: row.amount, date: row.date,
         category: categories[row.type][row.category] ? row.category : "other", note: row.description.trim(),
-        importId: row.key, ...(bankTarget ? { accountId: bankTarget } : {}), ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
+        importId: row.key, accountId: bankTarget, ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
     });
     if (data.items.length + next.length > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
     await persist({ ...data, items: [...data.items, ...next] });
@@ -8165,12 +8232,15 @@ function page(data) {
       <div class="group" id="account-entries"></div>
     </section>
     <section data-page="transactions" hidden>
-      <section class="panel period-summary" id="period" hidden>
+      <section class="panel period-summary" id="period">
         <dl class="period-values">
           <div><dt id="period-opening-label">Số dư đầu kỳ</dt><dd id="period-opening"></dd></div>
           <div><dt id="period-ending-label">Số dư cuối kỳ</dt><dd id="period-ending"></dd></div>
         </dl>
-        <button class="text-button" id="period-edit">Nhập số dư đầu kỳ</button>
+        <div class="period-actions">
+          <button class="text-button" id="period-edit">Nhập số dư đầu kỳ</button>
+          <button class="text-button muted-button" id="account-archive">Ẩn tài khoản</button>
+        </div>
       </section>
       <button class="secondary ledger-credit" id="ledger-credit" hidden>Trả thẻ / hoàn tiền</button>
       <div class="ledger-controls">
@@ -8203,6 +8273,13 @@ function page(data) {
       <div class="group">
         <button class="menu-row" data-tab="backup" aria-label="Sao lưu dữ liệu"><span class="glyph" data-icon="download"></span><span class="tx-text"><strong>Sao lưu dữ liệu</strong><small>Lưu và khôi phục tệp trên thiết bị</small></span><span data-icon="right"></span></button>
       </div>
+      <div class="group" id="account-maintenance" hidden>
+        <button class="menu-row" data-tab="archived-accounts" id="open-archived-accounts" aria-label="Tài khoản đã ẩn" hidden><span class="glyph" data-icon="bank"></span><span class="tx-text"><strong>Tài khoản đã ẩn</strong><small>Khôi phục tài khoản đã ẩn</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" id="remove-unassigned" aria-label="Xóa giao dịch chưa gán" hidden><span class="glyph" data-icon="list"></span><span class="tx-text"><strong>Xóa giao dịch chưa gán</strong><small id="unassigned-count"></small></span><span data-icon="right"></span></button>
+      </div>
+    </section>
+    <section data-page="archived-accounts" hidden>
+      <div class="group" id="archived-account-entries"></div>
     </section>
     <section data-page="budget" hidden>
       <div class="panel">
@@ -8333,7 +8410,10 @@ function page(data) {
   <form id="account-form">
     <div class="field"><label for="account-name">Tên tài khoản</label><input id="account-name" maxlength="80" placeholder="Ví dụ ACB" required></div>
     <p id="account-error" class="error" role="alert" hidden></p>
-    <div class="form-actions"><button class="primary" id="account-save">Lưu tài khoản</button></div>
+    <div class="form-actions">
+      <button class="secondary" type="button" id="account-add-card">Thêm thẻ tín dụng</button>
+      <button class="primary" id="account-save">Lưu tài khoản</button>
+    </div>
   </form>
 </dialog>
 <dialog id="opening-options" aria-labelledby="opening-title">
