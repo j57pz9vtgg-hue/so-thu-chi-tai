@@ -41,10 +41,12 @@ function model() {
   const members = { husband: "Chồng", wife: "Vợ", children: "Con thứ nhất", child2: "Con thứ hai", shared: "Chi chung" };
   const purposes = {
     loan_out: ["Cho mượn tiền", "expense"], loan_back: ["Thu hồi tiền cho mượn", "income"],
+    borrow_in: ["Vay tiền", "income"], borrow_pay: ["Trả nợ vay", "expense"],
     proxy_in: ["Thu hộ", "income"], proxy_out: ["Chi hộ", "expense"],
     transfer_in: ["Chuyển nội bộ vào", "income"], transfer_out: ["Chuyển nội bộ ra", "expense"],
     voucher: ["Nhận voucher", "income"],
   };
+  const relatedPurpose = (purpose) => /^(loan|borrow|proxy)_/.test(purpose);
   const validId = (value) => typeof value === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(value);
   const validName = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 80;
   const validDay = (day) => Number.isInteger(day) && day >= 1 && day <= 31;
@@ -255,7 +257,7 @@ function model() {
       if (accountId !== undefined && (cardId || !accountIds.has(accountId))) invalid();
       if (member !== undefined && (typeof member !== "string" || (!own(members, member) && !personIds.has(member)))) invalid();
       if (purpose !== undefined && (typeof purpose !== "string" || !own(purposes, purpose) || purposes[purpose][1] !== type
-          || cardId || (!member && /^(loan|proxy)_/.test(purpose)) || (member === "shared" && /^(loan|proxy)_/.test(purpose)))) invalid();
+          || cardId || (relatedPurpose(purpose) && (!member || member === "shared")))) invalid();
       if (importId !== undefined && (typeof importId !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(importId) || imports.has(importId))) invalid();
       if (importId) imports.add(importId);
       if (transferId !== undefined) {
@@ -331,7 +333,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categoryDefinitions, deleteCategory, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes };
+  return { categoryDefinitions, deleteCategory, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
 }
 
 const css = `
@@ -496,6 +498,11 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .filter:focus-visible, .type-choice:focus-visible { outline-offset: -3px; }
 .filter[aria-pressed=true], .type-choice[aria-pressed=true], .primary { background: var(--dark); color: #fff; }
 .types .type-choice { padding-inline: 4px; white-space: nowrap; }
+.debt-picker { display: flex; align-items: center; justify-content: space-between; width: 100%; margin: -5px 0 12px; text-align: left; }
+.debt-picker svg { width: 16px; height: 16px; }
+.debt-picker.is-active, .debt-options [aria-pressed=true] { background: var(--mint); }
+.debt-options { margin-bottom: 6px; }
+.debt-options .action-row { padding-inline: 8px; font-weight: 650; }
 .type-choice svg { width: 16px; height: 16px; }
 @media (max-width: 365px) { .types .type-choice { font-size: 12px; } }
 .empty { padding: 11px 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
@@ -1139,7 +1146,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return [...Object.entries(domain.members), ...data.people.map((person) => [person.id, person.name])]
       .filter(([id]) => includeArchived || id === keep || !isArchived(id));
   }
-  const relatedPurpose = (purpose) => /^(loan|proxy)_/.test(purpose);
+  const { relatedPurpose } = domain;
 
   function refreshPeople() {
     const selection = $("member-filter").value;
@@ -1165,18 +1172,22 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       if (item.date > today) continue;
       if (item.purpose === "voucher") { if (item.date.startsWith(month)) vouchers += item.amount; continue; }
       if (!relatedPurpose(item.purpose || "")) continue;
-      const current = totals.get(item.member) || { loan: 0, proxy: 0 };
+      const current = totals.get(item.member) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
       const direction = item.type === "income" ? 1 : -1;
-      if (item.purpose.startsWith("loan")) current.loan -= direction * item.amount;
-      else current.proxy += direction * item.amount;
+      if (item.purpose.startsWith("loan_")) current.loan -= direction * item.amount;
+      else if (item.purpose.startsWith("borrow_")) {
+        current.borrow += direction * item.amount;
+        current.hasBorrow = true;
+      } else current.proxy += direction * item.amount;
       totals.set(item.member, current);
     }
     text("voucher-total", "Mệnh giá voucher nhận trong tháng · " + fmt(vouchers));
-    $("people-balances").innerHTML = [...totals.entries()].map(([id, { loan, proxy }]) =>
+    $("people-balances").innerHTML = [...totals.entries()].map(([id, { loan, borrow, hasBorrow, proxy }]) =>
       '<div class="panel"><h3>' + enc(personName(id)) + '</h3>'
       + detail(loan >= 0 ? "Còn tiền cho mượn" : "Thu hồi vượt số đã ghi", fmt(Math.abs(loan)))
+      + (hasBorrow ? detail(borrow >= 0 ? "Còn phải trả nợ vay" : "Đã trả vượt số tiền vay", fmt(Math.abs(borrow))) : "")
       + detail(proxy >= 0 ? "Còn giữ hộ" : "Đã ứng hộ, còn chờ bù", fmt(Math.abs(proxy))) + '</div>').join("")
-      || '<p class="empty">Chưa có giao dịch cho mượn, thu hộ hoặc chi hộ.</p>';
+      || '<p class="empty">Chưa có giao dịch vay, cho mượn hoặc thu chi hộ.</p>';
   }
 
   function renderFamily(summary) {
@@ -1603,7 +1614,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (picked && options.some(([key]) => key === picked)) $("category").value = picked;
     const purpose = $("item-purpose").value;
     $("category-field").hidden = Boolean(purpose);
-    text("member-label", purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?");
+    const debt = purpose.startsWith("loan_") || purpose.startsWith("borrow_");
+    const memberLabel = purpose.startsWith("loan_") ? "Người vay" : purpose.startsWith("borrow_") ? "Người cho vay"
+      : purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?";
+    text("member-label", memberLabel);
+    text("debt-mode-label", debt ? domain.purposes[purpose][0] : "Vay, cho vay và trả nợ");
+    $("choose-debt").classList.toggle("is-active", debt);
     const account = $("item-card");
     const selection = account.options.length ? account.value : editorAccount;
     const allowCard = type === "expense" && !purpose;
@@ -1631,8 +1647,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("note").value = item ? item.note : "";
     $("delete").hidden = !item;
     const hasSpecialPurpose = item?.purpose && transactionKind(item) !== "transfer";
-    $("choose-transfer").hidden = Boolean(item?.cardId || hasSpecialPurpose) || tab === "cards"
-      || (tab === "transactions" && ledger.startsWith("card:"));
+    const isCard = Boolean(item?.cardId) || tab === "cards" || (tab === "transactions" && ledger.startsWith("card:"));
+    $("choose-transfer").hidden = isCard || Boolean(hasSpecialPurpose);
+    $("choose-debt").hidden = isCard;
     chooseType(item ? item.type : "expense", item?.category || "");
     error("edit-error");
     $("editor").showModal();
@@ -1649,6 +1666,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if ($("item-member").value) item.member = $("item-member").value;
     const purpose = $("item-purpose").value;
     if (relatedPurpose(purpose) && (!item.member || item.member === "shared")) {
+      $("item-member").focus();
       return error("edit-error", "Chọn người liên quan cho khoản này.");
     }
     if (purpose) item.purpose = purpose;
@@ -1936,6 +1954,23 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("transaction-next").onclick = () => stepTransactionPage(1);
   $("edit-form").onsubmit = saveItem;
   $("delete").onclick = deleteItem;
+  $("choose-debt").onclick = () => {
+    const current = $("item-purpose").value;
+    for (const button of $("debt-dialog").querySelectorAll("[data-debt-purpose]")) {
+      button.setAttribute("aria-pressed", String(current === button.dataset.debtPurpose));
+    }
+    $("debt-dialog").showModal();
+  };
+  $("debt-dialog").onclick = (event) => {
+    const option = event.target.closest("[data-debt-purpose]");
+    if (!option) return;
+    const purpose = option.dataset.debtPurpose;
+    $("item-purpose").value = purpose;
+    chooseType(domain.purposes[purpose]?.[1] || type);
+    if (!$("item-card").value) $("editor-options").open = true;
+    error("edit-error");
+    $("debt-dialog").close();
+  };
   $("choose-transfer").onclick = () => {
     $("editor").close();
     openTransfer(null, editing);
@@ -8582,7 +8617,7 @@ function page(data, removedUnassigned = 0) {
         <button class="menu-row" data-tab="budget" aria-label="Ngân sách"><span class="glyph" data-icon="pie"></span><span class="tx-text"><strong>Ngân sách</strong><small>Giới hạn theo tháng và danh mục</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="cards" aria-label="Thẻ tín dụng"><span class="glyph" data-icon="card"></span><span class="tx-text"><strong>Thẻ tín dụng</strong><small>Dư nợ, kỳ sao kê và thanh toán</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="savings" aria-label="Tiết kiệm"><span class="glyph" data-icon="stash"></span><span class="tx-text"><strong>Tiết kiệm</strong><small>Tiền gửi, lịch lãi và đáo hạn</small></span><span data-icon="right"></span></button>
-        <button class="menu-row" data-tab="people" aria-label="Gia đình"><span class="glyph" data-icon="people"></span><span class="tx-text"><strong>Gia đình</strong><small>Thành viên, cho mượn và thu chi hộ</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="people" aria-label="Gia đình"><span class="glyph" data-icon="people"></span><span class="tx-text"><strong>Gia đình</strong><small>Thành viên, vay và thu chi hộ</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="categories" aria-label="Danh mục"><span class="glyph" data-icon="tag"></span><span class="tx-text"><strong>Danh mục</strong><small>Danh mục khoản thu và khoản chi</small></span><span data-icon="right"></span></button>
       </div>
       <div class="group">
@@ -8664,7 +8699,7 @@ function page(data, removedUnassigned = 0) {
         <div id="archived-people-list"></div>
       </details>
       <details class="group">
-        <summary class="summary-line">Cho mượn và thu chi hộ<span class="disclosure-arrow" data-icon="right"></span></summary>
+        <summary class="summary-line">Vay, cho mượn và thu chi hộ<span class="disclosure-arrow" data-icon="right"></span></summary>
         <div class="report-content" id="people-balances"></div>
       </details>
       <p class="empty" id="voucher-total"></p>
@@ -8688,6 +8723,9 @@ function page(data, removedUnassigned = 0) {
       <button type="button" class="type-choice" data-type="income"><span data-icon="up"></span> Khoản thu</button>
       <button type="button" class="type-choice" id="choose-transfer">Chuyển khoản</button>
     </div>
+    <button class="secondary debt-picker" id="choose-debt" type="button" aria-haspopup="dialog">
+      <span id="debt-mode-label">Vay, cho vay và trả nợ</span><span data-icon="right"></span>
+    </button>
     <div class="field amount-field"><label for="amount">Số tiền</label><input id="amount" inputmode="numeric" placeholder="Nhập số tiền" maxlength="17" required><span aria-hidden="true">₫</span></div>
     <div class="field-pair">
       <div class="field" id="category-field"><label for="category">Danh mục</label><select id="category"></select></div>
@@ -8705,6 +8743,16 @@ function page(data, removedUnassigned = 0) {
     <p id="edit-error" class="error" role="alert" hidden></p>
     <div class="form-actions"><button class="danger" type="button" id="delete" hidden>Xóa</button><button class="primary" id="save-item">Lưu giao dịch</button></div>
   </form>
+</dialog>
+<dialog id="debt-dialog" aria-labelledby="debt-title">
+  <div class="dialog-heading"><h2 id="debt-title">Vay, cho vay và trả nợ</h2><button data-close="debt-dialog" aria-label="Đóng" data-icon="x"></button></div>
+  <div class="group debt-options">
+    <button type="button" class="action-row" data-debt-purpose="loan_out">Cho vay / cho mượn</button>
+    <button type="button" class="action-row" data-debt-purpose="loan_back">Nhận lại tiền đã cho vay</button>
+    <button type="button" class="action-row" data-debt-purpose="borrow_in">Vay tiền</button>
+    <button type="button" class="action-row" data-debt-purpose="borrow_pay">Trả nợ vay</button>
+  </div>
+  <button class="text-button" type="button" data-debt-purpose="">Quay về thu chi thông thường</button>
 </dialog>
 <dialog id="transfer-dialog" aria-labelledby="transfer-title">
   <div class="sheet-handle" aria-hidden="true"></div>
