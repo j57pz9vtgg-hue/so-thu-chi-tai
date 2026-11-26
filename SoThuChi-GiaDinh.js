@@ -1602,8 +1602,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("saving-principal").value = saving ? money.format(saving.principal) : deposit?.importId ? money.format(deposit.amount)
       : draft ? $("amount").value : "";
     $("saving-rate").value = saving ? saving.rate : "";
-    const defaultDate = sourceAccount && !today.startsWith(month) ? month + "-01" : today;
-    $("saving-start").value = saving?.start || (deposit?.importId ? deposit.date : draft ? $("date").value : defaultDate);
+    $("saving-start").value = saving?.start || (deposit?.importId ? deposit.date : draft ? $("date").value : today);
     $("saving-maturity").value = saving ? saving.maturity : "";
     const source = deposit && (!draft || deposit.importId) ? itemAccountKey(deposit) : sourceAccount;
     $("saving-source").replaceChildren(new Option("Chỉ theo dõi sổ", ""), ...accountRows()
@@ -1921,7 +1920,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const card = ledger.startsWith("card:");
     const anchor = domain.latestOpening(data.openings, ledger, month);
     $("ledger-credit").hidden = !card;
-    $("create-saving-in-ledger").hidden = card;
     text("period-opening-label", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
     text("period-ending-label", card ? "Dư nợ cuối kỳ" : "Số dư cuối kỳ");
     let opening = anchor ? anchor.amount : 0;
@@ -2342,7 +2340,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     go("transactions");
   }
   $("ledger-credit").onclick = () => { cardId = ledger.slice(5); openCredit(); };
-  $("create-saving-in-ledger").onclick = () => openSaving(null, ledger);
   $("account-archive").onclick = () => {
     const key = ledger;
     const name = ledgerName(key);
@@ -9202,7 +9199,6 @@ function page(data, removedUnassigned = 0) {
         </div>
       </section>
       <button class="secondary ledger-action" id="ledger-credit" hidden>Trả thẻ / hoàn tiền</button>
-      <button class="secondary ledger-action" id="create-saving-in-ledger" hidden><span data-icon="stash" aria-hidden="true"></span> Gửi tiết kiệm</button>
       <div class="ledger-controls">
         <div class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="Tìm giao dịch" placeholder="Tìm giao dịch"></div>
         <details id="transaction-filters">
