@@ -237,9 +237,16 @@ function model() {
       personIds.add(person.id);
       return { id: person.id, name: person.name, family: person.family };
     });
+    const deletedMembers = new Set();
+    const deletedDefaultMembers = list(input.deletedDefaultMembers, Object.keys(members).length - 1).map((id) => {
+      if (typeof id !== "string" || !own(members, id) || id === "shared" || deletedMembers.has(id)) invalid();
+      deletedMembers.add(id);
+      return id;
+    });
     const archivedMembers = new Set();
     const archivedPeople = list(input.archivedPeople, 254).map((id) => {
-      if (typeof id !== "string" || id === "shared" || archivedMembers.has(id) || (!own(members, id) && !personIds.has(id))) invalid();
+      if (typeof id !== "string" || id === "shared" || archivedMembers.has(id) || deletedMembers.has(id)
+          || (!own(members, id) && !personIds.has(id))) invalid();
       archivedMembers.add(id);
       return id;
     });
@@ -254,12 +261,17 @@ function model() {
           || item.note.length > 200) invalid();
       ids.add(item.id);
       const { id, type, category, amount, date, note } = item;
-      const { cardId, accountId, member, purpose, importId, transferId } = item;
+      const { cardId, accountId, member, removedMember, purpose, importId, transferId } = item;
       if (cardId !== undefined && (type !== "expense" || !cardIds.has(cardId))) invalid();
       if (accountId !== undefined && (cardId || !accountIds.has(accountId))) invalid();
-      if (member !== undefined && (typeof member !== "string" || (!own(members, member) && !personIds.has(member)))) invalid();
+      if (member !== undefined && (typeof member !== "string" || deletedMembers.has(member)
+          || (!own(members, member) && !personIds.has(member)))) invalid();
       if (purpose !== undefined && (typeof purpose !== "string" || !own(purposes, purpose) || purposes[purpose][1] !== type
-          || cardId || (relatedPurpose(purpose) && (!member || member === "shared")))) invalid();
+          || cardId)) invalid();
+      const related = relatedPurpose(purpose);
+      if (removedMember !== undefined && (!related || member !== undefined || !validId(removedMember)
+          || own(members, removedMember) || personIds.has(removedMember) || removedMember === "unassigned")) invalid();
+      if (related && (member === "shared" || (!member && !removedMember))) invalid();
       if (importId !== undefined && (typeof importId !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(importId) || imports.has(importId))) invalid();
       if (importId) imports.add(importId);
       if (transferId !== undefined) {
@@ -271,7 +283,8 @@ function model() {
         transferPairs.set(transferId, pair);
       }
       return { id, type, category, amount, date, note, ...(cardId ? { cardId } : {}), ...(accountId ? { accountId } : {}),
-        ...(member ? { member } : {}), ...(purpose ? { purpose } : {}), ...(importId ? { importId } : {}),
+        ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}),
+        ...(purpose ? { purpose } : {}), ...(importId ? { importId } : {}),
         ...(transferId ? { transferId } : {}) };
     });
     for (const { expense: from, income: to } of transferPairs.values()) {
@@ -298,8 +311,35 @@ function model() {
         budgets[month][key] = amount;
       }
     }
-    return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople, archivedAccounts,
+    return { version: 1, items, budgets, cards, savings, people, accounts, openings, archivedPeople, deletedDefaultMembers, archivedAccounts,
       customCategories, deletedDefaultCategories };
+  }
+  function deletePerson(ledger, id, historyId) {
+    const deletedDefaultMembers = ledger.deletedDefaultMembers || [];
+    const isDefault = own(members, id);
+    if (!validId(id) || id === "shared" || deletedDefaultMembers.includes(id)
+        || (!isDefault && !ledger.people.some((person) => person.id === id))) {
+      throw new Error("Không thể xóa người này.");
+    }
+    let transactionCount = 0;
+    let relatedCount = 0;
+    const items = ledger.items.map((item) => {
+      if (item.member !== id) return item;
+      transactionCount++;
+      const { member, ...entry } = item;
+      if (!relatedPurpose(entry.purpose)) return entry;
+      relatedCount++;
+      return { ...entry, removedMember: historyId };
+    });
+    if (relatedCount && (!validId(historyId) || own(members, historyId) || historyId === "unassigned"
+        || ledger.people.some((person) => person.id === historyId) || ledger.items.some((item) => item.removedMember === historyId))) {
+      throw new Error("Không thể lưu lịch sử người đã xóa. Hãy thử lại.");
+    }
+    const people = ledger.people.filter((person) => person.id !== id);
+    const archivedPeople = ledger.archivedPeople.filter((archived) => archived !== id);
+    const next = { ...ledger, items, people, archivedPeople,
+      deletedDefaultMembers: isDefault ? [...deletedDefaultMembers, id] : deletedDefaultMembers };
+    return { next, transactionCount, relatedCount };
   }
   function deleteCategory(ledger, kind, id) {
     const definitions = categoryDefinitions(ledger.customCategories, ledger.deletedDefaultCategories);
@@ -346,7 +386,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categoryDefinitions, deleteCategory, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
+  return { categoryDefinitions, deleteCategory, deletePerson, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
 }
 
 const css = `
@@ -1070,7 +1110,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
       day = item.date;
       const title = item.credit || item.transferId ? name : (item.note || name);
-      const subtitle = [item.credit || item.transferId ? item.note : name, item.member && personName(item.member)]
+      const subtitle = [item.credit || item.transferId ? item.note : name, personName(transactionPerson(item))]
         .filter(Boolean).join(" · ");
       const action = item.transferId ? 'data-transfer' : item.credit ? 'data-edit-credit' : 'data-edit';
       const mark = item.transferId ? "transfer" : item.credit ? "card" : icon;
@@ -1152,7 +1192,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       && (!category || (!item.purpose && !item.credit && category === categoryKey(item.type, item.category)))
       && (!member || (item.member || "unassigned") === member)
       && searchKey(item.note + " " + (item.credit ? creditLabel(item.credit) : transactionLabel(item))
-        + " " + personName(item.member)).includes(query));
+        + " " + personName(transactionPerson(item))).includes(query));
     const pages = Math.max(1, Math.ceil(results.length / TRANSACTION_PAGE_SIZE));
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
@@ -1196,8 +1236,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const creditLabel = (kind) => kind === "payment" ? "Trả thẻ" : "Hoàn tiền";
   const detail = (label, value) => '<div class="detail"><span>' + label + '</span><strong>' + value + '</strong></div>';
 
-  const personName = (id) => Object.prototype.hasOwnProperty.call(domain.members, id)
-    ? domain.members[id] : peopleById.get(id)?.name || "";
+  const removedPersonPrefix = "removed:";
+  const transactionPerson = (item) => item.member || (item.removedMember ? removedPersonPrefix + item.removedMember : "");
+  const personName = (id = "") => id.startsWith(removedPersonPrefix) ? "Người đã xóa"
+    : Object.prototype.hasOwnProperty.call(domain.members, id) ? domain.members[id] : peopleById.get(id)?.name || "";
+  const isFamilyMember = (id) => Object.prototype.hasOwnProperty.call(domain.members, id) || peopleById.get(id)?.family === true;
   function indexTransfers(items) {
     const pairs = new Map();
     for (const item of items) {
@@ -1220,7 +1263,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const isArchived = (id) => data.archivedPeople.includes(id);
   function personOptions(includeArchived = false, keep = "") {
     return [...Object.entries(domain.members), ...data.people.map((person) => [person.id, person.name])]
-      .filter(([id]) => includeArchived || id === keep || !isArchived(id));
+      .filter(([id]) => !data.deletedDefaultMembers?.includes(id) && (includeArchived || id === keep || !isArchived(id)));
   }
   const { relatedPurpose } = domain;
   const personFieldLabels = {
@@ -1240,14 +1283,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const totals = new Map();
     for (const item of data.items) {
       if (item.date > date || !relatedPurpose(item.purpose || "")) continue;
-      const current = totals.get(item.member) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
+      const person = transactionPerson(item);
+      const current = totals.get(person) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
       const direction = item.type === "income" ? 1 : -1;
       if (item.purpose.startsWith("loan_")) current.loan -= direction * item.amount;
       else if (item.purpose.startsWith("borrow_")) {
         current.borrow += direction * item.amount;
         current.hasBorrow = true;
       } else current.proxy += direction * item.amount;
-      totals.set(item.member, current);
+      totals.set(person, current);
     }
     return totals;
   }
@@ -1256,7 +1300,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const nameRow = (name) => glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong></span>';
     const family = [], others = [];
     for (const [id, name] of personOptions()) {
-      const list = peopleById.get(id)?.family === false ? others : family;
+      const list = isFamilyMember(id) ? family : others;
       list.push(id === "shared" ? '<div class="tx">' + nameRow(name) + '</div>'
         : '<button class="tx" data-person="' + id + '">' + nameRow(name) + svg("right") + '</button>');
     }
@@ -1264,8 +1308,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("other-people").innerHTML = others.join("") || '<p class="empty">Chưa có người khác.</p>';
     $("people-archive").hidden = !data.archivedPeople.length;
     $("archived-people-list").innerHTML = personOptions(true).filter(([id]) => isArchived(id)).map(([id, name]) =>
-      '<button class="tx" data-restore-person="' + id + '">' + nameRow(name)
-      + '<span class="restore-person-label">Khôi phục</span></button>').join("");
+      '<button class="tx" data-person="' + id + '">' + nameRow(name) + svg("right") + '</button>').join("");
     const vouchers = data.items.reduce((total, item) => total + (item.purpose === "voucher"
       && item.date <= today && item.date.startsWith(month) ? item.amount : 0), 0);
     text("voucher-total", "Mệnh giá voucher nhận trong tháng · " + fmt(vouchers));
@@ -1280,14 +1323,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function renderFamily(summary) {
     const totals = new Map();
     for (const item of summary.items) {
-      if (item.purpose) continue;
-      const key = item.member || "unassigned";
-      const current = totals.get(key) || { income: 0, expense: 0 };
+      if (item.purpose || !isFamilyMember(item.member)) continue;
+      const current = totals.get(item.member) || { income: 0, expense: 0 };
       current[item.type] += item.amount;
-      totals.set(key, current);
+      totals.set(item.member, current);
     }
-    const people = personOptions(true).filter(([id]) => !isArchived(id) || totals.has(id));
-    $("family-summary").innerHTML = [...people, ["unassigned", "Chưa phân loại"]].map(([key, name]) => {
+    const people = personOptions(true).filter(([id]) => isFamilyMember(id) && (!isArchived(id) || totals.has(id)));
+    $("family-summary").innerHTML = people.map(([key, name]) => {
       const { income = 0, expense = 0 } = totals.get(key) || {};
       return '<div class="family-line"><strong>' + enc(name) + '</strong><small>Thu ' + fmt(income)
         + ' · Chi ' + fmt(expense) + '</small></div>';
@@ -1836,8 +1878,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
   function selectEditorPerson(member = "") {
     const select = $("item-member");
-    select.replaceChildren(new Option("Chưa phân loại", ""),
-      ...personOptions(false, member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
+    const options = personOptions(false, member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id));
+    if (member.startsWith(removedPersonPrefix)) options.unshift(new Option(personName(member), member));
+    select.replaceChildren(new Option("Chưa phân loại", ""), ...options);
     select.value = member;
   }
   function openEditor(item = null) {
@@ -1845,7 +1888,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     editorAccount = item ? itemAccountKey(item)
       : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
     $("item-card").replaceChildren();
-    selectEditorPerson(item?.member);
+    selectEditorPerson(item ? transactionPerson(item) : "");
     $("item-purpose").value = item && item.purpose || "";
     $("editor-options").open = !editorAccount || Boolean(item && (item.purpose || item.cardId));
     text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
@@ -1870,9 +1913,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (!editing && data.items.length >= domain.maxRows) return error("edit-error", "Sổ đã đạt giới hạn 20.000 giao dịch.");
     const id = editing ? editing.id : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     const item = { id, type, amount, date, category: $("category").value, note: $("note").value.trim() };
-    if ($("item-member").value) item.member = $("item-member").value;
+    const member = $("item-member").value;
     const purpose = $("item-purpose").value;
-    if (relatedPurpose(purpose) && (!item.member || item.member === "shared")) {
+    const keepRemoved = editing?.removedMember && member === transactionPerson(editing);
+    if (member && !keepRemoved) item.member = member;
+    if (keepRemoved && relatedPurpose(purpose)) item.removedMember = editing.removedMember;
+    if (relatedPurpose(purpose) && (!item.removedMember && (!item.member || item.member === "shared"))) {
       $("item-member").focus();
       return error("edit-error", "Chọn người liên quan cho khoản này.");
     }
@@ -2316,40 +2362,48 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("person-kind-field").hidden = fixed;
     $("person-save").hidden = fixed;
     $("person-remove").hidden = !id;
+    $("person-restore").hidden = !isArchived(id);
     error("person-error");
     $("person-dialog").showModal();
   }
   $("new-person").onclick = () => openPerson();
   $("editor-add-person").onclick = () => openPerson();
-  $("people-list").onclick = (event) => {
+  const editPerson = (event) => {
     const entry = event.target.closest("[data-person]");
     if (entry) openPerson(entry.dataset.person);
   };
+  $("people-list").onclick = editPerson;
+  $("archived-people-list").onclick = editPerson;
   $("person-remove").onclick = () => {
     const id = $("person-form").dataset.id;
     const name = personName(id);
-    confirm("Bỏ khỏi danh sách", "Bỏ " + name + " khỏi danh sách chọn? Các giao dịch đã ghi vẫn giữ tên này.",
-      "Bỏ khỏi danh sách", async () => {
-        await persist({ ...data, archivedPeople: [...data.archivedPeople, id] });
-        refreshPeople();
-        $("person-dialog").close();
-        renderPeople();
-        notice("Đã bỏ " + name + " khỏi danh sách.");
-      });
+    const before = data;
+    const { next, transactionCount, relatedCount } = domain.deletePerson(before, id, uid());
+    const message = "Xóa vĩnh viễn " + name + "?"
+      + (transactionCount ? " Giữ " + transactionCount + " giao dịch và bỏ tên đã gán." : "")
+      + (relatedCount ? ' Các khoản vay, cho vay và thu chi hộ được giữ dưới tên "Người đã xóa".' : "");
+    confirm("Xóa người", message, "Xóa người", async () => {
+      if (data !== before) throw new Error("Sổ đã thay đổi. Hãy mở lại tên để kiểm tra trước khi xóa.");
+      await persist(next);
+      refreshPeople();
+      $("person-dialog").close();
+      renderPeople();
+      notice("Đã xóa " + name + ".");
+    });
   };
-  $("archived-people-list").onclick = async (event) => {
-    const entry = event.target.closest("[data-restore-person]");
-    if (!entry) return;
-    const id = entry.dataset.restorePerson;
-    entry.disabled = true;
+  $("person-restore").onclick = async () => {
+    const id = $("person-form").dataset.id;
+    if (!isArchived(id)) return;
+    $("person-restore").disabled = true;
     try {
       await persist({ ...data, archivedPeople: data.archivedPeople.filter((value) => value !== id) });
       refreshPeople();
+      $("person-dialog").close();
       renderPeople();
       $("people-list").querySelector('[data-person="' + id + '"]')?.focus();
       notice("Đã khôi phục " + personName(id) + ".");
-    } catch (err) { notice(err.message); }
-    finally { entry.disabled = false; }
+    } catch (err) { error("person-error", err.message); }
+    finally { $("person-restore").disabled = false; }
   };
   asyncForm("person-form", "person-error", async () => {
     const name = $("person-name").value.trim();
@@ -2471,7 +2525,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const imported = bankImportCount(bankTarget);
     text("bank-imported-count", imported + " giao dịch");
     $("remove-bank-imports").disabled = bankWorking || !imported;
-    for (const row of bankRows) if (isArchived(row.member)) row.member = "";
+    const activePeople = new Set(personOptions().map(([id]) => id));
+    for (const row of bankRows) if (row.member && !activePeople.has(row.member)) row.member = "";
     const selected = bankRows.reduce((sum, row) => sum + Number(row.selected && !row.duplicate), 0);
     text("bank-selected", selected + " / " + bankRows.length + " dòng đã chọn");
     $("bank-save").disabled = bankWorking || !selected;
@@ -8942,7 +8997,7 @@ function page(data, removedUnassigned = 0) {
         <div class="group" id="other-people"></div>
       </div>
       <details class="group" id="people-archive" hidden>
-        <summary class="summary-line">Người đã bỏ khỏi danh sách<span class="disclosure-arrow" data-icon="right"></span></summary>
+        <summary class="summary-line">Người đã bỏ trước đây<span class="disclosure-arrow" data-icon="right"></span></summary>
         <div id="archived-people-list"></div>
       </details>
       <details class="group">
@@ -9113,7 +9168,8 @@ function page(data, removedUnassigned = 0) {
     <div class="field" id="person-kind-field"><label for="person-kind">Nhóm</label><select id="person-kind"><option value="family">Gia đình</option><option value="other">Người khác</option></select></div>
     <p id="person-error" class="error" role="alert" hidden></p>
     <div class="form-actions">
-      <button class="danger" type="button" id="person-remove" hidden>Bỏ khỏi danh sách</button>
+      <button class="danger" type="button" id="person-remove" hidden>Xóa người</button>
+      <button class="secondary" type="button" id="person-restore" hidden>Khôi phục</button>
       <button class="primary" id="person-save">Lưu người</button>
     </div>
   </form>
