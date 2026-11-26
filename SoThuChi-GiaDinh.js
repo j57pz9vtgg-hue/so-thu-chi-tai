@@ -42,6 +42,7 @@ function model() {
   const purposes = {
     loan_out: ["Cho mượn tiền", "expense"], loan_back: ["Thu hồi tiền cho mượn", "income"],
     borrow_in: ["Vay tiền", "income"], borrow_pay: ["Trả nợ vay", "expense"],
+    saving_out: ["Gửi gốc tiết kiệm", "expense"], saving_in: ["Rút gốc tiết kiệm", "income"],
     proxy_in: ["Thu hộ", "income"], proxy_out: ["Chi hộ", "expense"],
     transfer_in: ["Chuyển nội bộ vào", "income"], transfer_out: ["Chuyển nội bộ ra", "expense"],
     voucher: ["Nhận voucher", "income"],
@@ -398,6 +399,8 @@ svg { display: inline-block; width: 21px; height: 21px; vertical-align: middle; 
   line-height: 1.13; letter-spacing: -.045em; overflow-wrap: anywhere; margin: 6px 0 15px;
   font-variant-numeric: tabular-nums;
 }
+.hero .balance { margin-bottom: 4px; }
+.balance-note { display: block; color: #d9e8dc; font-size: 12px; line-height: 1.45; margin-bottom: 12px; }
 .totals { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid #719584; padding-top: 12px; }
 .stat { min-width: 0; }
 .stat + .stat { border-left: 1px solid #719584; padding-left: 16px; }
@@ -423,6 +426,9 @@ summary::-webkit-details-marker { display: none; }
   min-height: 50px; font-size: 15px; font-weight: 720; padding: 3px 0;
 }
 .summary-line > :last-child, .menu-row > :last-child { margin-left: auto; }
+.position-summary { gap: 8px; }
+.position-summary > strong { margin-left: auto; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.position-summary > :last-child { margin-left: 0; flex: none; }
 .disclosure-arrow svg { width: 16px; height: 16px; transition: transform .15s ease; }
 details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .details-divider + .details-divider { border-top: 1px solid var(--line); }
@@ -1010,10 +1016,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const clean = value.trim();
     return /^(?:\d+|\d{1,3}(?:\.\d{3})+)$/.test(clean) ? Number(clean.replace(/\./g, "")) : NaN;
   }
-  function stats() {
-    if (summaryCache?.month === month) return summaryCache;
-    const items = data.items.filter((item) => domain.hasAccount(item) && item.date.startsWith(month))
-      .reverse().sort((a, b) => b.date.localeCompare(a.date));
+  function summarizeSpending(items) {
     const spending = {};
     let income = 0, expense = 0;
     for (const item of items) {
@@ -1024,7 +1027,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         spending[item.category] = (spending[item.category] || 0) + item.amount;
       }
     }
-    summaryCache = { month, items, spending, income, expense };
+    return { items, spending, income, expense };
+  }
+  function stats() {
+    if (summaryCache?.month === month) return summaryCache;
+    const items = data.items.filter((item) => domain.hasAccount(item) && item.date.startsWith(month))
+      .reverse().sort((a, b) => b.date.localeCompare(a.date));
+    summaryCache = { month, ...summarizeSpending(items) };
     return summaryCache;
   }
   function bar(percent, color = "") {
@@ -1052,8 +1061,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         + signed(incoming ? item.amount : -item.amount) + '</span></button>';
     }).join("");
   }
-  function renderOverview(summary) {
-    text("balance", signed(summary.income - summary.expense));
+  function renderOverview(monthSummary) {
+    const end = domain.cycleDate(month + "-01", 0, 31);
+    const date = end < today ? end : today;
+    const summary = monthSummary.items[0]?.date > date
+      ? summarizeSpending(monthSummary.items.filter((item) => item.date <= date)) : monthSummary;
+    const balances = accountBalancesAt(date);
+    let available = 0;
+    let missingOpening = false;
+    for (const [key, balance] of balances) {
+      if (key.startsWith("card:")) continue;
+      available += balance.amount;
+      missingOpening ||= !balance.anchor;
+    }
+    text("balance", fmt(available));
+    text("balance-note", "Đến " + dateName(date) + (missingOpening ? " · Ước tính, thiếu số dư đầu kỳ" : " · Tiền mặt và ngân hàng"));
     text("income", fmt(summary.income));
     text("expense", fmt(summary.expense));
     $("breakdown").innerHTML = Object.entries(summary.spending).sort((a, b) => b[1] - a[1]).map(([key, amount]) => {
@@ -1062,6 +1084,38 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       return '<div class="breakdown">' + glyph(icon) + '<div><b>' + enc(name) + '</b>' + bar(percent, color)
         + '</div><span>' + percent + '%</span><strong>' + fmt(amount) + '</strong></div>';
     }).join("") || '<p class="empty">Chưa có khoản chi trong tháng này.</p>';
+    renderPositions(date, balances);
+    renderFamily(summary);
+  }
+
+  function renderPositions(date, balances) {
+    const savings = data.savings.filter((saving) => saving.start <= date && !(saving.settled?.date <= date))
+      .sort((a, b) => a.maturity.localeCompare(b.maturity));
+    const principal = savings.reduce((total, saving) => total + (savingClosed(saving, date) ? 0 : saving.principal), 0);
+    text("home-saving-total", fmt(principal));
+    $("home-saving-list").innerHTML = savings.map((saving) =>
+      '<button class="tx" data-saving="' + saving.id + '"><span class="tx-text"><strong>' + enc(saving.bank)
+      + ' · ' + enc(saving.name) + '</strong><small>' + savingStatus(saving, date)
+      + '</small></span><strong class="amount">' + fmt(saving.principal) + '</strong></button>').join("")
+      || '<p class="empty">Chưa có sổ đang gửi.</p>';
+
+    const lending = [];
+    const debts = [];
+    for (const [id, { loan, borrow }] of peopleBalances(date)) {
+      const name = personName(id);
+      if (loan > 0) lending.push([name, loan]);
+      if (borrow > 0) debts.push(["Vay · " + name, borrow]);
+    }
+    for (const card of data.cards) {
+      const debt = balances.get("card:" + card.id).amount;
+      if (debt > 0) debts.push(["Thẻ · " + card.name, debt]);
+    }
+    for (const [id, entries, empty] of [["home-lending", lending, "Chưa có tiền cho vay cần thu hồi."],
+      ["home-debt", debts, "Chưa có nợ vay hoặc nợ thẻ cần trả."]]) {
+      text(id + "-total", fmt(entries.reduce((total, [, amount]) => total + amount, 0)));
+      $(id + "-list").innerHTML = entries.map(([name, amount]) => detail(enc(name), fmt(amount))).join("")
+        || '<p class="empty">' + empty + '</p>';
+    }
   }
   function transactionKind(item) {
     return item.purpose === "transfer_in" || item.purpose === "transfer_out" ? "transfer" : item.type;
@@ -1155,6 +1209,22 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("member-filter").value = [...$("member-filter").options].some((option) => option.value === selection) ? selection : "";
   }
 
+  function peopleBalances(date) {
+    const totals = new Map();
+    for (const item of data.items) {
+      if (item.date > date || !relatedPurpose(item.purpose || "")) continue;
+      const current = totals.get(item.member) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
+      const direction = item.type === "income" ? 1 : -1;
+      if (item.purpose.startsWith("loan_")) current.loan -= direction * item.amount;
+      else if (item.purpose.startsWith("borrow_")) {
+        current.borrow += direction * item.amount;
+        current.hasBorrow = true;
+      } else current.proxy += direction * item.amount;
+      totals.set(item.member, current);
+    }
+    return totals;
+  }
+
   function renderPeople() {
     const nameRow = (id, name) => glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong>'
       + (peopleById.has(id) ? '<small>' + (peopleById.get(id).family ? 'Thành viên gia đình' : 'Người liên quan') + '</small>' : '')
@@ -1166,23 +1236,10 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("archived-people-list").innerHTML = personOptions(true).filter(([id]) => isArchived(id)).map(([id, name]) =>
       '<button class="tx" data-restore-person="' + id + '">' + nameRow(id, name)
       + '<span class="restore-person-label">Khôi phục</span></button>').join("");
-    const totals = new Map();
-    let vouchers = 0;
-    for (const item of data.items) {
-      if (item.date > today) continue;
-      if (item.purpose === "voucher") { if (item.date.startsWith(month)) vouchers += item.amount; continue; }
-      if (!relatedPurpose(item.purpose || "")) continue;
-      const current = totals.get(item.member) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
-      const direction = item.type === "income" ? 1 : -1;
-      if (item.purpose.startsWith("loan_")) current.loan -= direction * item.amount;
-      else if (item.purpose.startsWith("borrow_")) {
-        current.borrow += direction * item.amount;
-        current.hasBorrow = true;
-      } else current.proxy += direction * item.amount;
-      totals.set(item.member, current);
-    }
+    const vouchers = data.items.reduce((total, item) => total + (item.purpose === "voucher"
+      && item.date <= today && item.date.startsWith(month) ? item.amount : 0), 0);
     text("voucher-total", "Mệnh giá voucher nhận trong tháng · " + fmt(vouchers));
-    $("people-balances").innerHTML = [...totals.entries()].map(([id, { loan, borrow, hasBorrow, proxy }]) =>
+    $("people-balances").innerHTML = [...peopleBalances(today)].map(([id, { loan, borrow, hasBorrow, proxy }]) =>
       '<div class="panel"><h3>' + enc(personName(id)) + '</h3>'
       + detail(loan >= 0 ? "Còn tiền cho mượn" : "Thu hồi vượt số đã ghi", fmt(Math.abs(loan)))
       + (hasBorrow ? detail(borrow >= 0 ? "Còn phải trả nợ vay" : "Đã trả vượt số tiền vay", fmt(Math.abs(borrow))) : "")
@@ -1285,16 +1342,25 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("credit-dialog").showModal();
   }
 
+  function savingClosed(saving, date) {
+    return saving.settled?.date <= date || (saving.autoSettle && saving.maturity <= date);
+  }
+
+  function savingStatus(saving, date) {
+    if (saving.settled?.date <= date) return "Đã xác nhận tất toán " + dateName(saving.settled.date);
+    if (saving.start > date) return "Chưa đến ngày gửi · " + dateName(saving.start);
+    if (savingClosed(saving, date)) return "Tất toán tự động · Chờ đối chiếu";
+    const maturity = saving.maturity < date ? "Đã qua đáo hạn · " : saving.maturity === date ? "Đến ngày đáo hạn · " : "Đáo hạn ";
+    return maturity + dateName(saving.maturity);
+  }
+
   function renderSavings() {
-    const isClosed = (saving) => Boolean(saving.settled || (saving.autoSettle && saving.maturity <= today));
+    const isClosed = (saving) => savingClosed(saving, today);
     const open = data.savings.filter((saving) => saving.start <= today && !isClosed(saving));
     text("saving-total", fmt(open.reduce((sum, saving) => sum + saving.principal, 0)));
     $("saving-list").innerHTML = data.savings.slice().sort((a, b) =>
       Number(isClosed(a)) - Number(isClosed(b)) || a.maturity.localeCompare(b.maturity)).map((saving) => {
-      const status = saving.settled ? "Đã xác nhận tất toán " + dateName(saving.settled.date)
-        : saving.start > today ? "Chưa đến ngày gửi · " + dateName(saving.start)
-        : isClosed(saving) ? "Tất toán tự động · Chờ đối chiếu"
-        : (saving.maturity < today ? "Đã qua đáo hạn · " : saving.maturity === today ? "Đáo hạn hôm nay · " : "Đáo hạn ") + dateName(saving.maturity);
+      const status = savingStatus(saving, today);
       const estimated = domain.savingSchedule(saving).reduce((sum, payout) => sum + payout.amount, 0);
       const interest = saving.settled ? "Lãi thực nhận cả sổ " + fmt(saving.settled.interest) : "Lãi dự kiến " + fmt(estimated);
       return '<button class="tx" data-saving="' + saving.id + '">' + glyph("wallet")
@@ -1365,10 +1431,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       const button = event.target.closest("[data-credit]");
       if (button) openCredit(activeCard().credits.find((entry) => entry.id === button.dataset.credit));
     };
-    $("saving-list").onclick = (event) => {
+    const editSaving = (event) => {
       const button = event.target.closest("[data-saving]");
       if (button) openSaving(data.savings.find((saving) => saving.id === button.dataset.saving));
     };
+    $("saving-list").onclick = editSaving;
+    $("home-saving-list").onclick = editSaving;
     $("statement").onclick = (event) => {
       if (!event.target.closest("#remove-closing")) return;
       const card = activeCard();
@@ -1394,7 +1462,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       confirm("Xóa sổ tiết kiệm", "Xóa sổ tiết kiệm đã chọn?", "Xóa", async () => {
         await persist({ ...data, savings: data.savings.filter((saving) => saving.id !== id) });
         $("saving-dialog").close();
-        renderSavings();
+        render();
       });
     };
     asyncForm("card-form", "card-error", async () => {
@@ -1458,7 +1526,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       const savings = editingSaving ? data.savings.map((old) => old.id === saving.id ? saving : old) : [...data.savings, saving];
       await persist({ ...data, savings });
       $("saving-dialog").close();
-      renderSavings();
+      render();
     });
   }
 
@@ -1498,6 +1566,33 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       ...data.accounts.map((account) => ["bank:" + account.id, "bank", "Tài khoản ngân hàng"]),
       ...data.cards.map((card) => ["card:" + card.id, "card", "Thẻ tín dụng"]),
     ];
+  }
+
+  function accountBalancesAt(date) {
+    const period = date.slice(0, 7);
+    const balances = new Map(accountRows().map(([key]) => [key, { anchor: null, amount: 0 }]));
+    for (const opening of data.openings) {
+      if (opening.month > period) continue;
+      const balance = balances.get(opening.key);
+      if (balance.anchor && balance.anchor.month >= opening.month) continue;
+      balance.anchor = opening;
+      balance.amount = opening.amount;
+    }
+    for (const item of data.items) {
+      if (item.date > date || item.purpose === "voucher") continue;
+      const balance = balances.get(itemAccountKey(item));
+      if (!balance || (balance.anchor && item.date < balance.anchor.month + "-01")) continue;
+      const sign = item.type === "income" || item.cardId ? 1 : -1;
+      balance.amount += sign * item.amount;
+    }
+    for (const card of data.cards) {
+      const balance = balances.get("card:" + card.id);
+      const start = balance.anchor ? balance.anchor.month + "-01" : "";
+      for (const credit of card.credits) {
+        if (credit.date >= start && credit.date <= date) balance.amount -= credit.amount;
+      }
+    }
+    return balances;
   }
 
   function renderAccountList() {
@@ -1570,7 +1665,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     text("month-label", monthName(month));
     $("previous").disabled = month === "1900-01";
     $("next").disabled = month === "2999-12";
-    if (tab === "overview") { renderOverview(summary); renderFamily(summary); }
+    if (tab === "overview") renderOverview(summary);
     if (tab === "transactions") { renderPeriod(); renderItems(summary); }
     if (tab === "people") renderPeople();
     if (tab === "budget") renderBudget(summary);
@@ -8560,11 +8655,26 @@ function page(data, removedUnassigned = 0) {
     <section data-page="overview">
       <section class="hero">
         <h2>Số dư khả dụng</h2><strong id="balance" class="balance"></strong>
+        <small id="balance-note" class="balance-note"></small>
         <div class="totals">
-          <div class="stat"><small>Tổng có</small><strong id="income"></strong></div>
-          <div class="stat"><small>Tổng nợ</small><strong id="expense"></strong></div>
+          <div class="stat"><small>Tổng thu</small><strong id="income"></strong></div>
+          <div class="stat"><small>Tổng chi</small><strong id="expense"></strong></div>
         </div>
       </section>
+      <div class="group summary-group">
+        <details class="details-divider">
+          <summary class="summary-line position-summary"><span data-icon="stash"></span>Sổ tiết kiệm<strong id="home-saving-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
+          <div class="report-content" id="home-saving-list"></div>
+        </details>
+        <details class="details-divider">
+          <summary class="summary-line position-summary"><span data-icon="up"></span>Còn cho vay<strong id="home-lending-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
+          <div class="report-content" id="home-lending-list"></div>
+        </details>
+        <details class="details-divider">
+          <summary class="summary-line position-summary"><span data-icon="down"></span>Đang nợ<strong id="home-debt-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
+          <div class="report-content" id="home-debt-list"></div>
+        </details>
+      </div>
       <div class="group summary-group">
         <details class="details-divider">
           <summary class="summary-line"><span data-icon="pie"></span>Chi theo danh mục<span class="disclosure-arrow" data-icon="right"></span></summary>
