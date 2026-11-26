@@ -140,7 +140,13 @@ function model() {
     return value;
   }
 
-  function validateCards(value) {
+  function validateImportId(id, imports) {
+    if (id === undefined) return;
+    if (typeof id !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(id) || imports.has(id)) invalid();
+    imports.add(id);
+  }
+
+  function validateCards(value, imports) {
     const ids = new Set();
     return list(value, 100).map((card) => {
       if (!object(card) || !validId(card.id) || ids.has(card.id) || !validName(card.name)
@@ -160,10 +166,11 @@ function model() {
             || !["payment", "refund"].includes(credit.kind) || !validDate(credit.date)
             || !isAmount(credit.amount) || typeof credit.note !== "string" || credit.note.length > 200) invalid();
         creditIds.add(credit.id);
-        const { debitId } = credit;
+        const { debitId, importId } = credit;
         if (debitId !== undefined && (credit.kind !== "payment" || !validId(debitId))) invalid();
+        validateImportId(importId, imports);
         return { id: credit.id, kind: credit.kind, date: credit.date, amount: credit.amount, note: credit.note,
-          ...(debitId ? { debitId } : {}) };
+          ...(debitId ? { debitId } : {}), ...(importId ? { importId } : {}) };
       });
       return { id: card.id, name: card.name, closeDay: card.closeDay, dueDay: card.dueDay, closings, dueDates, credits };
     });
@@ -208,7 +215,8 @@ function model() {
       return key;
     });
     const categories = categoryDefinitions(customCategories, deletedDefaultCategories);
-    const cards = validateCards(input.cards);
+    const imports = new Set();
+    const cards = validateCards(input.cards, imports);
     const savings = validateSavings(input.savings);
     const cardIds = new Set(cards.map((card) => card.id));
     const accountIds = new Set(["cash"]);
@@ -254,7 +262,6 @@ function model() {
       archivedMembers.add(id);
       return id;
     });
-    const imports = new Set();
     const transferPairs = new Map();
     const ids = new Set();
     const items = input.items.map((item) => {
@@ -276,8 +283,7 @@ function model() {
       if (removedMember !== undefined && (!related || member !== undefined || !validId(removedMember)
           || own(members, removedMember) || personIds.has(removedMember) || removedMember === "unassigned")) invalid();
       if (related && (member === "shared" || (!member && !removedMember))) invalid();
-      if (importId !== undefined && (typeof importId !== "string" || !/^bank-[a-z0-9-]{1,90}$/.test(importId) || imports.has(importId))) invalid();
-      if (importId) imports.add(importId);
+      validateImportId(importId, imports);
       if (transferId !== undefined) {
         if (!validId(transferId) || !accountId || cardId || member
             || (purpose !== "transfer_in" && purpose !== "transfer_out")) invalid();
@@ -737,21 +743,23 @@ function statementReader(validDate, isAmount, normalize) {
     memo: /(?:noi dung|dien giai|mo ta|description|narrative|memo|details|remark)/,
     debit: /^(?:ghi no|no|debit|debit amount|phat sinh no|so tien ghi no|so tien no|chi|tien ra|rut tien|withdrawal|withdrawals|money out)(?: debit| vnd)*$/,
     credit: /^(?:ghi co|co|credit|credit amount|phat sinh co|so tien ghi co|so tien co|thu|tien vao|gui tien|deposit|deposits|money in)(?: credit| vnd)*$/,
-    amount: /^(?:so tien|amount|transaction amount|so tien giao dich|phat sinh)(?: vnd)?$/,
-    type: /^(?:loai|loai giao dich|type|dr cr|debit credit|thu chi)$/,
+    amount: /^(?:so tien|amount|transaction amount|so tien giao dich|phat sinh)(?: transaction amount| vnd)*$/,
+    billed: /^(?:so tien vnd|vnd amount|amount in vnd|so tien quy doi|billed amount)(?: vnd| billed amount)*$/,
+    currency: /^(?:loai tien|loai tien te|tien te|currency|transaction currency)(?: currency)?$/,
+    type: /^(?:loai|loai giao dich|type|transaction type|dr cr|debit credit|thu chi)(?: transaction type)?$/,
   };
   const heading = (value) => normalize(String(value ?? "")).replace(/[^a-z0-9]+/g, " ").trim();
   function columnMap(row) {
     return Object.fromEntries(Object.entries(words).map(([field, pattern]) =>
       [field, row.findIndex((value) => pattern.test(heading(value)))]));
   }
-  function table(rows, calendar1904 = false) {
+  function table(rows, calendar1904 = false, card = false) {
     const found = [];
     let mapping = null;
     let skipped = 0;
     for (const row of rows) {
       const columns = columnMap(row);
-      if (columns.date >= 0 && (columns.amount >= 0 || columns.debit >= 0 || columns.credit >= 0)) {
+      if (columns.date >= 0 && (columns.amount >= 0 || columns.billed >= 0 || columns.debit >= 0 || columns.credit >= 0)) {
         mapping = columns;
         continue;
       }
@@ -760,23 +768,35 @@ function statementReader(validDate, isAmount, normalize) {
       if (!date) continue;
       const debit = Math.abs(numberValue(row[mapping.debit]));
       const credit = Math.abs(numberValue(row[mapping.credit]));
-      const signed = numberValue(row[mapping.amount]);
+      const currency = heading(row[mapping.currency]);
+      const foreign = card && currency && !/^(?:vnd|704|dong)$/.test(currency);
+      const signed = numberValue(row[mapping.billed >= 0 ? mapping.billed : mapping.amount]);
+      if (foreign && (mapping.billed < 0 || !Number.isFinite(signed) || !signed)) { skipped++; continue; }
       const description = String(row[mapping.memo] ?? "").trim().slice(0, 200);
       const side = heading(row[mapping.type]);
+      const cardKind = card && /^(?:purchase|chi bang the|giao dich mua hang)$/.test(side) ? "purchase"
+        : card && /^(?:payment|repayment|tra the|thanh toan the|tra no the)$/.test(side) ? "payment"
+        : card && /^(?:refund|hoan tien|hoan tra)$/.test(side) ? "refund" : "";
       if (!Number.isFinite(debit) || !Number.isFinite(credit) || (debit && credit)) { skipped++; continue; }
-      if (debit && !credit) found.push({ date, amount: debit, type: "expense", description });
-      else if (credit && !debit) found.push({ date, amount: credit, type: "income", description });
+      if (debit || credit) {
+        const type = debit ? "expense" : "income";
+        const amount = card && mapping.billed >= 0 && Number.isFinite(signed) && signed ? Math.abs(signed) : debit || credit;
+        const conflict = cardKind && (cardKind === "purchase" ? type !== "expense" : type !== "income");
+        found.push({ date, amount, type: conflict ? "" : type, description, directionKnown: !conflict,
+          cardKind: conflict ? "" : cardKind, ...(conflict ? { manual: true } : {}) });
+      }
       else if (Number.isFinite(signed) && signed !== 0) {
-        const explicit = /^(?:cr|c|co|ghi co|credit|thu)$/.test(side) ? "income"
+        const explicit = cardKind ? (cardKind === "purchase" ? "expense" : "income")
+          : /^(?:cr|c|co|ghi co|credit|thu)$/.test(side) ? "income"
           : /^(?:dr|d|no|ghi no|debit|chi)$/.test(side) ? "expense" : "";
-        const prefix = String(row[mapping.amount]).trim();
+        const prefix = String(row[mapping.billed >= 0 ? mapping.billed : mapping.amount]).trim();
         const type = explicit || (signed < 0 ? "expense" : /^\+/.test(prefix) ? "income" : "");
-        found.push({ date, amount: Math.abs(signed), type, description });
+        found.push({ date, amount: Math.abs(signed), type, description, directionKnown: Boolean(explicit), cardKind });
       } else skipped++;
     }
     return { found, skipped };
   }
-  function csv(raw) {
+  function csv(raw, card) {
     if (raw.includes("\u0000")) throw new Error("Hãy xuất lại CSV UTF‑8.");
     const content = raw.replace(/^\uFEFF/, "");
     const lines = content.split(/\r?\n/).slice(0, 24);
@@ -811,9 +831,9 @@ function statementReader(validDate, isAmount, normalize) {
     }
     if (quoted) throw new Error("CSV có ô chưa đóng dấu ngoặc kép.");
     if (field || row.length) rows.push([...row, field]);
-    return table(rows);
+    return table(rows, false, card);
   }
-  async function workbook(bytes) {
+  async function workbook(bytes, card) {
     // Only extract spreadsheet XML parts, with a cap on actual decompressed bytes.
     const parts = Object.create(null);
     const seen = new Set();
@@ -861,7 +881,7 @@ function statementReader(validDate, isAmount, normalize) {
         }
         return values;
       });
-      const result = table(rows, calendar1904);
+      const result = table(rows, calendar1904, card);
       combined.found.push(...result.found);
       combined.skipped += result.skipped;
       if (combined.found.length > LIMIT) throw new Error("Tối đa 2.000 dòng mỗi tệp. Hãy chia nhỏ sao kê.");
@@ -924,6 +944,7 @@ function statementReader(validDate, isAmount, normalize) {
     for (const line of lines) {
       const values = line.map((cell) => cell.value);
       const next = columnMap(values);
+      if (next.billed >= 0) next.amount = next.billed;
       if (next.date >= 0 && (next.debit >= 0 || next.credit >= 0 || next.amount >= 0)) {
         map = { next, headings: line };
         continue;
@@ -957,12 +978,12 @@ function statementReader(validDate, isAmount, normalize) {
     }
     return { found, skipped: skipped + scan };
   }
-  async function read(file) {
+  async function read(file, card = false) {
     if (file.size > MAX_FILE) throw new Error("Tệp quá 12 MB. Hãy chia nhỏ sao kê.");
     const extension = file.name.split(".").pop().toLowerCase();
     let result;
-    if (extension === "csv") result = csv(await file.text());
-    else if (extension === "xlsx") result = await workbook(new Uint8Array(await file.arrayBuffer()));
+    if (extension === "csv") result = csv(await file.text(), card);
+    else if (extension === "xlsx") result = await workbook(new Uint8Array(await file.arrayBuffer()), card);
     else if (extension === "pdf") result = await pdf(new Uint8Array(await file.arrayBuffer()));
     else throw new Error("Chọn .xlsx, .csv UTF‑8 hoặc PDF có chữ. Với .xls, hãy lưu lại thành .xlsx.");
     if (result.found.length > LIMIT) throw new Error("Tối đa 2.000 dòng mỗi tệp. Hãy chia nhỏ sao kê.");
@@ -1038,9 +1059,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   let filter = "all";
   let type = "expense";
   let purpose = "";
+  let cardPurchase = false;
   let editing = null;
   let editingTransfer = null;
-  let convertingTransfer = null;
   let budgetKey = "total";
   let confirmation;
   let timer;
@@ -1087,6 +1108,43 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function amountFrom(value) {
     const clean = value.trim();
     return /^(?:\d+|\d{1,3}(?:\.\d{3})+)$/.test(clean) ? Number(clean.replace(/\./g, "")) : NaN;
+  }
+  function groupAmount(field, adjustSeparators = false) {
+    const { value, selectionStart, selectionEnd, selectionDirection } = field;
+    const raw = adjustSeparators && /^[\d.]+$/.test(value) ? value.replace(/\./g, "") : value;
+    const amount = amountFrom(raw);
+    if (!Number.isSafeInteger(amount)) return;
+    const grouped = money.format(amount);
+    if (grouped === value) return;
+    const caret = (offset) => {
+      let remaining = value.slice(offset).replace(/\D/g, "").length;
+      let position = grouped.length;
+      while (remaining > 0 && position > 0) {
+        if (grouped[--position] !== ".") remaining -= 1;
+      }
+      return position;
+    };
+    field.value = grouped;
+    field.setSelectionRange(caret(selectionStart), caret(selectionEnd), selectionDirection);
+  }
+  function bindGroupedAmount(field, enabled = () => true) {
+    let editingAmount = false;
+    field.addEventListener("beforeinput", (event) => {
+      editingAmount = enabled() && Number.isSafeInteger(amountFrom(field.value));
+      if (!editingAmount || field.selectionStart !== field.selectionEnd) return;
+      const caret = field.selectionStart;
+      if (event.inputType === "deleteContentBackward" && field.value[caret - 1] === ".") {
+        field.setSelectionRange(caret - 2, caret);
+      } else if (event.inputType === "deleteContentForward" && field.value[caret] === ".") {
+        field.setSelectionRange(caret, caret + 2);
+      }
+    });
+    field.addEventListener("input", (event) => {
+      if (!enabled() || event.isComposing) return;
+      const changedDigits = /^\d+$/.test(event.data || "") || event.inputType?.startsWith("delete");
+      groupAmount(field, editingAmount && changedDigits);
+      editingAmount = false;
+    });
   }
   function summarizeSpending(items) {
     const spending = {};
@@ -1361,6 +1419,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const archived = isAccountArchived("card:" + cardId);
     $("card-purchase").hidden = archived;
     $("add-credit").hidden = archived;
+    $("open-card-import").hidden = archived;
     $("card-select").value = cardId;
     const latest = card.closings.slice().sort().reverse();
     if (!latest.includes(selectedClosing)) selectedClosing = latest[0] || "";
@@ -1422,31 +1481,53 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return entry?.debitId ? data.items.find((item) => item.id === entry.debitId) : null;
   }
 
+  function matchingPaymentDebits(source, date, amount) {
+    if (!source || !domain.validDate(date) || !domain.isAmount(amount)) return [];
+    return data.items.filter((item) => item.date === date && item.amount === amount && item.type === "expense"
+      && itemAccountKey(item) === source && !item.transferId && (!item.purpose || item.purpose === "transfer_out"));
+  }
+
+  function updateCreditSource() {
+    const payment = $("credit-kind").value === "payment";
+    $("credit-source-field").hidden = !payment;
+    text("credit-title", payment ? "Trả nợ thẻ tín dụng" : "Hoàn tiền thẻ tín dụng");
+    const matched = $("credit-debit");
+    const selected = matched.value;
+    const matches = payment && !editingCredit?.debitId && !convertingPayment
+      ? matchingPaymentDebits($("credit-source").value, $("credit-date").value, amountFrom($("credit-amount").value)) : [];
+    $("credit-debit-field").hidden = !matches.length;
+    matched.replaceChildren(new Option("Chọn giao dịch đã ghi hoặc ghi mới", ""), ...matches.map((item) =>
+      new Option(item.note || transactionLabel(item), item.id)), new Option("Ghi giao dịch mới", "+"));
+    if (matches.length && (selected === "+" || matches.some((item) => item.id === selected))) matched.value = selected;
+  }
+
   function openCredit(entry = null, draftKind = "") {
     editingCredit = entry;
     convertingPayment = draftKind === "payment" ? editing : null;
     const debit = paymentDebit(entry) || convertingPayment;
-    const payment = draftKind === "payment" || Boolean(debit);
     const draftAccount = draftKind ? $("item-card").value : "";
-    const from = (debit?.importId || entry) && debit ? itemAccountKey(debit) : draftAccount;
+    const from = (debit?.importId || entry) && debit ? itemAccountKey(debit)
+      : draftAccount.startsWith("card:") ? "" : draftAccount;
     const card = draftKind && !draftAccount.startsWith("card:") ? "" : draftAccount.slice(5) || cardId;
     const options = data.cards.filter((entry) => entry.id === card || !isAccountArchived("card:" + entry.id));
     $("credit-card").replaceChildren(new Option("Chọn thẻ tín dụng", ""), ...options.map((entry) => new Option(entry.name, entry.id)));
     $("credit-card").value = card || (options.length === 1 ? options[0].id : "");
-    $("credit-card-field").hidden = !draftKind && !payment;
+    $("credit-card-field").hidden = !draftKind && !debit;
     $("credit-card").disabled = Boolean(entry) || !draftKind;
-    $("credit-source-field").hidden = !payment;
-    $("credit-source").replaceChildren(new Option("Chọn tài khoản trả nợ", ""), ...accountRows()
+    const sourcePlaceholder = entry?.kind === "payment" && !debit ? "Chưa liên kết tài khoản" : "Chọn tài khoản trả nợ";
+    $("credit-source").replaceChildren(new Option(sourcePlaceholder, ""), ...accountRows()
       .filter(([key]) => !key.startsWith("card:") && (key === from || (!debit?.importId && !isAccountArchived(key))))
       .map(([key]) => new Option(ledgerName(key), key)));
     $("credit-source").value = from;
+    $("credit-source").disabled = Boolean(debit?.importId);
     $("credit-kind-field").hidden = Boolean(draftKind || debit);
     $("credit-kind").value = entry?.kind || draftKind || "payment";
+    $("credit-debit").value = "";
     $("credit-date").value = entry?.date || (debit?.importId ? debit.date : draftKind ? $("date").value : today);
     $("credit-amount").value = entry || debit?.importId ? money.format((entry || debit).amount) : draftKind ? $("amount").value : "";
     $("credit-note").value = entry?.note ?? (draftKind ? $("note").value : "");
     $("credit-amount").readOnly = $("credit-date").readOnly = Boolean(debit?.importId);
-    text("credit-title", payment ? "Trả nợ thẻ tín dụng" : draftKind === "refund" ? "Hoàn tiền thẻ tín dụng" : "Trả thẻ / hoàn tiền");
+    updateCreditSource();
     $("delete-credit").hidden = !entry;
     error("credit-error");
     $("credit-dialog").showModal();
@@ -1576,6 +1657,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       $("date").value = today;
     };
     $("add-credit").onclick = () => openCredit();
+    $("credit-kind").onchange = $("credit-source").onchange = updateCreditSource;
+    $("credit-date").oninput = $("credit-amount").oninput = updateCreditSource;
     $("new-saving").onclick = () => openSaving();
     $("saving-source").onchange = updateSavingDepositOptions;
     $("saving-principal").oninput = updateSavingDepositOptions;
@@ -1655,19 +1738,27 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       if (!card) throw new Error("Chọn thẻ tín dụng để ghi giao dịch.");
       if (!domain.isAmount(amount)) throw new Error("Nhập số tiền VND hợp lệ.");
       if (!domain.validDate(date) || date > today) throw new Error("Chọn ngày giao dịch không muộn hơn hôm nay.");
-      const entry = { id: editingCredit ? editingCredit.id : uid(), amount, date,
+      const entry = { ...editingCredit, id: editingCredit ? editingCredit.id : uid(), amount, date,
         kind: $("credit-kind").value, note: $("credit-note").value.trim() };
       let items = data.items;
-      if (!$("credit-source-field").hidden) {
+      if (entry.kind === "payment") {
         const source = $("credit-source").value;
-        if (!source) throw new Error("Chọn tài khoản trả nợ thẻ.");
-        const original = paymentDebit(editingCredit) || convertingPayment;
-        if (!original && items.length >= domain.maxRows) throw new Error("Sổ đã đạt giới hạn 20.000 giao dịch.");
-        const debit = { id: original?.id || uid(), type: "expense", purpose: "card_payment", category: "other",
-          accountId: source === "cash" ? source : source.slice(5), amount, date, note: entry.note,
-          ...(original?.importId ? { importId: original.importId } : {}) };
-        entry.debitId = debit.id;
-        items = original ? items.map((item) => item.id === debit.id ? debit : item) : [...items, debit];
+        const linked = paymentDebit(editingCredit) || convertingPayment;
+        if (!source && (editingCredit?.kind !== "payment" || linked)) throw new Error("Chọn tài khoản trả nợ thẻ.");
+        if (source) {
+          const matches = linked ? [] : matchingPaymentDebits(source, date, amount);
+          const choice = $("credit-debit").value;
+          const matched = matches.find((item) => item.id === choice);
+          if (matches.length && !matched && choice !== "+") throw new Error("Chọn giao dịch đã ghi hoặc chọn Ghi giao dịch mới.");
+          const original = linked || matched;
+          if (!original && items.length >= domain.maxRows) throw new Error("Sổ đã đạt giới hạn 20.000 giao dịch.");
+          if (matched?.importId || (!entry.note && matched?.note)) entry.note = matched.note;
+          const debit = { id: original?.id || uid(), type: "expense", purpose: "card_payment", category: "other",
+            accountId: source === "cash" ? source : source.slice(5), amount, date, note: entry.note,
+            ...(original?.importId ? { importId: original.importId } : {}) };
+          entry.debitId = debit.id;
+          items = original ? items.map((item) => item.id === debit.id ? debit : item) : [...items, debit];
+        }
       }
       const credits = editingCredit ? card.credits.map((old) => old.id === entry.id ? entry : old) : [...card.credits, entry];
       const cards = data.cards.map((current) => current.id === card.id ? { ...card, credits } : current);
@@ -1891,7 +1982,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("ledger-back").hidden = tab !== "transactions";
     $("account-subtabs").hidden = !accountTabs.has(tab);
     for (const [page, button] of Object.entries(pageActions)) $(button).hidden = page !== tab;
-    if (tab === "transactions") $("open-bank").hidden = !ledger.startsWith("bank:");
+    if (tab === "transactions") $("open-bank").hidden = ledger === "cash";
     $("add").hidden = !showAdd;
     $("page-shell").classList.toggle("with-fab", showAdd);
     $("toast").hidden = true;
@@ -1916,23 +2007,39 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (domain.validMonth(next)) { month = next; transactionPage = 0; render(); }
   }
   const entryModes = [
-    ["income", "Thu tiền"], ["expense", "Chi tiền"], ["transfer", "Chuyển khoản"],
-    ["saving_out", "Gửi tiết kiệm"], ["card_payment", "Trả nợ thẻ tín dụng"], ["card_refund", "Hoàn tiền thẻ tín dụng"],
-    ["loan_out", "Cho vay"], ["loan_back", "Thu hồi tiền cho vay"], ["borrow_in", "Đi vay"], ["borrow_pay", "Trả nợ vay"],
-    ["proxy_in", "Thu hộ"], ["proxy_out", "Chi hộ"], ["saving_in", "Rút gốc tiết kiệm"], ["voucher", "Nhận voucher"],
-    ["transfer_in", "Chuyển nội bộ vào"], ["transfer_out", "Chuyển nội bộ ra"],
+    ["income", "Thu tiền"], ["expense", "Chi tiền"], ["loan", "Cho vay"], ["borrow", "Đi vay"],
+    ["transfer", "Chuyển khoản"], ["savings", "Sổ tiết kiệm"], ["card", "Thẻ tín dụng"],
   ];
   const entryLabels = Object.fromEntries(entryModes);
+  const entryActions = {
+    loan: [["loan_out", "Cho vay"], ["loan_back", "Thu hồi tiền cho vay"]],
+    borrow: [["borrow_in", "Đi vay"], ["borrow_pay", "Trả nợ vay"]],
+    savings: [["saving_out", "Gửi tiết kiệm"], ["saving_in", "Rút gốc tiết kiệm"]],
+    card: [["card_purchase", "Chi bằng thẻ"], ["card_payment", "Trả nợ thẻ tín dụng"], ["card_refund", "Hoàn tiền thẻ"]],
+  };
 
-  function entryModesForEditor() {
-    const card = Boolean(editing?.cardId) || $("item-card").value.startsWith("card:")
+  function editorEntryMode() {
+    if (cardPurchase) return "card";
+    if (purpose.startsWith("loan_")) return "loan";
+    if (purpose.startsWith("borrow_")) return "borrow";
+    if (purpose.startsWith("saving_")) return "savings";
+    if (purpose.startsWith("transfer")) return "transfer";
+    return type;
+  }
+
+  function cardEditorContext() {
+    return Boolean(editing?.cardId)
       || tab === "cards" || (tab === "transactions" && ledger.startsWith("card:"));
-    if (card) return entryModes.filter(([mode]) => mode === "expense" || (!editing && ["card_payment", "card_refund"].includes(mode)));
-    const payment = !editing || (editing.type === "expense" && (!editing.purpose || editing.purpose === "transfer_out"));
-    const deposit = payment || editing?.purpose === "saving_out";
-    const transfer = !editing?.purpose || transactionKind(editing) === "transfer";
-    return entryModes.filter(([mode]) => mode !== "card_refund" && (mode !== "transfer" || transfer)
-      && (mode !== "card_payment" || payment) && (mode !== "saving_out" || deposit));
+  }
+
+  function canChooseMode(mode) {
+    if (editingTransfer) return mode === "transfer";
+    if (cardEditorContext()) return mode === "expense" || mode === "card";
+    return mode !== "transfer" || !editing?.purpose || transactionKind(editing) === "transfer";
+  }
+
+  function canConvertToExpense() {
+    return !editing || (editing.type === "expense" && (!editing.purpose || editing.purpose === "transfer_out"));
   }
 
   function chooseType(next, category) {
@@ -1942,17 +2049,22 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("category").replaceChildren(...options.map(([key, [name]]) => new Option(name, key)));
     if (picked && options.some(([key]) => key === picked)) $("category").value = picked;
     $("category-field").hidden = Boolean(purpose);
+    const transfer = purpose === "transfer";
+    $("transfer-fields").hidden = !transfer;
+    $("editor-person-field").hidden = $("editor-account-field").hidden = transfer;
+    $("transfer-conversion-note").hidden = !transfer || !editing;
     const personPurpose = relatedPurpose(purpose);
     const memberLabel = personFieldLabels[purpose]
       || (purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?");
     text("member-label", memberLabel);
-    text("entry-type-label", entryLabels[purpose || type]);
+    text("entry-type-label", entryLabels[editorEntryMode()]);
+    text("editor-account-label", cardPurchase ? "Thẻ tín dụng" : "Tài khoản");
     $("editor-add-person").hidden = !personPurpose;
     const account = $("item-card");
     const selection = account.options.length ? account.value : editorAccount;
     const allowCard = type === "expense" && !purpose;
     const original = editing && itemAccountKey(editing);
-    const usable = accountRows().filter(([key]) => (!key.startsWith("card:") || allowCard)
+    const usable = accountRows().filter(([key]) => (cardPurchase ? key.startsWith("card:") : !key.startsWith("card:") || allowCard)
       && (!isAccountArchived(key) || key === original));
     account.replaceChildren(new Option("Chọn tài khoản", ""), ...usable.map(([key]) =>
       new Option(ledgerName(key) + (isAccountArchived(key) ? " (đã ẩn)" : ""), key)));
@@ -1965,20 +2077,25 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     select.replaceChildren(new Option("Chưa phân loại", ""), ...options);
     select.value = member;
   }
-  function openEditor(item = null) {
+  function openEditor(item = null, pair = null) {
     editing = item;
-    editorAccount = item ? itemAccountKey(item)
+    editingTransfer = pair;
+    const current = item || pair?.expense;
+    editorAccount = current ? itemAccountKey(current) : tab === "cards" ? "card:" + cardId
       : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
     $("item-card").replaceChildren();
     selectEditorPerson(item ? transactionPerson(item) : "");
     purpose = item?.purpose || "";
-    text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
-    $("amount").value = item ? money.format(item.amount) : "";
-    $("date").value = item ? item.date : month === today.slice(0,7) ? today : month + "-01";
-    $("note").value = item ? item.note : "";
-    $("delete").hidden = !item;
-    chooseType(item ? item.type : "expense", item?.category || "");
+    cardPurchase = editorAccount.startsWith("card:");
+    text("editor-title", current ? "Sửa giao dịch" : "Thêm giao dịch");
+    $("amount").value = current ? money.format(current.amount) : "";
+    $("date").value = current ? current.date : month === today.slice(0,7) ? today : month + "-01";
+    $("note").value = current ? current.note : "";
+    $("delete").hidden = !current;
+    text("delete", pair ? "Xóa chuyển khoản" : "Xóa");
     error("edit-error");
+    if (pair) selectTransferMode();
+    else chooseType(item ? item.type : "expense", item?.category || "");
     $("editor").showModal();
   }
   async function saveItem(event) {
@@ -1987,9 +2104,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const date = $("date").value;
     if (!domain.isAmount(amount)) return error("edit-error", "Nhập số nguyên từ 1 đến " + fmt(domain.maxAmount) + ".");
     if (!domain.validDate(date)) return error("edit-error", "Chọn ngày hợp lệ.");
+    const note = $("note").value.trim();
+    if (purpose === "transfer") {
+      try { await commitEditorItems(transferItems(amount, date, note), date, "Đã lưu chuyển khoản."); }
+      catch (err) { error("edit-error", err.message); }
+      return;
+    }
     if (!editing && data.items.length >= domain.maxRows) return error("edit-error", "Sổ đã đạt giới hạn 20.000 giao dịch.");
     const id = editing ? editing.id : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-    const item = { id, type, amount, date, category: $("category").value, note: $("note").value.trim() };
+    const item = { id, type, amount, date, category: $("category").value, note };
     const member = $("item-member").value;
     const keepRemoved = editing?.removedMember && member === transactionPerson(editing);
     if (member && !keepRemoved) item.member = member;
@@ -2009,13 +2132,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     else if (source) item.accountId = source === "cash" ? source : source.slice(5);
     if (editing && editing.importId) item.importId = editing.importId;
     const items = editing ? data.items.map((old) => old.id === id ? item : old) : [...data.items, item];
+    await commitEditorItems(items, date, "Đã lưu giao dịch.");
+  }
+  async function commitEditorItems(items, date, message) {
     $("save-item").disabled = true;
     try {
       await persist({ ...data, items });
       month = date.slice(0, 7);
+      transactionPage = 0;
       $("editor").close();
       render();
-      notice("Đã lưu giao dịch.");
+      notice(message);
     } catch (err) { error("edit-error", err.message); }
     finally { $("save-item").disabled = false; }
   }
@@ -2026,33 +2153,36 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     select.value = options.some(([key]) => key === selected) ? selected : "";
   }
 
-  function openTransfer(pair = null, original = null) {
-    editingTransfer = pair;
-    convertingTransfer = original;
-    const { expense, income } = pair || {};
-    const selected = $("item-card").value;
-    const from = expense ? itemAccountKey(expense) : original?.type === "income" ? "" : selected;
-    const to = income ? itemAccountKey(income) : original?.type === "income" ? selected : "";
-    transferOptions($("transfer-from"), from, expense && from);
-    transferOptions($("transfer-to"), to, income && to);
-    text("transfer-title", pair ? "Sửa chuyển khoản" : original ? "Đổi sang chuyển khoản" : "Chuyển khoản");
-    $("transfer-conversion-note").hidden = !original;
-    $("transfer-amount").value = expense ? money.format(expense.amount) : $("amount").value;
-    $("transfer-date").value = expense ? expense.date : $("date").value;
-    $("transfer-note").value = expense ? expense.note : $("note").value;
-    $("delete-transfer").hidden = !pair;
-    $("transfer-back").hidden = Boolean(pair);
-    const needsAccounts = !pair && $("transfer-from").options.length < 3;
-    $("save-transfer").disabled = needsAccounts;
-    error("transfer-error", needsAccounts ? "Thêm hoặc khôi phục tài khoản để có hai tài khoản chuyển tiền." : "");
-    $("transfer-dialog").showModal();
+  function selectTransferMode() {
+    if (purpose === "transfer") return;
+    const { expense, income } = editingTransfer || {};
+    const selected = $("item-card").value || editorAccount;
+    const from = expense ? itemAccountKey(expense) : editing?.type === "income" ? "" : selected;
+    const to = income ? itemAccountKey(income) : editing?.type === "income" ? selected : "";
+    const original = editing ? itemAccountKey(editing) : "";
+    transferOptions($("transfer-from"), from, expense ? from : editing?.type === "expense" ? original : "");
+    transferOptions($("transfer-to"), to, income ? to : editing?.type === "income" ? original : "");
+    purpose = "transfer";
+    cardPurchase = false;
+    chooseType("expense");
   }
 
-  function finishTransfer(message) {
-    $("transfer-dialog").close();
-    $("editor").close();
-    render();
-    notice(message);
+  function transferItems(amount, date, note) {
+    const from = $("transfer-from").value;
+    const to = $("transfer-to").value;
+    if (!from || !to || from === to) throw new Error("Chọn hai tài khoản khác nhau.");
+    const added = editingTransfer ? 0 : editing ? 1 : 2;
+    if (data.items.length + added > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
+
+    const transferId = editingTransfer?.expense.transferId || uid();
+    const fields = { transferId, amount, date, note, category: "other" };
+    const leg = (direction, legPurpose, key) => {
+      const previous = editingTransfer?.[direction] || (editing?.type === direction ? editing : null);
+      return { ...fields, id: previous?.id || uid(), type: direction, purpose: legPurpose, accountId: key === "cash" ? key : key.slice(5),
+        ...(previous?.importId ? { importId: previous.importId } : {}) };
+    };
+    const items = data.items.filter((item) => item.transferId !== transferId && item.id !== editing?.id);
+    return [...items, leg("expense", "transfer_out", from), leg("income", "transfer_in", to)];
   }
 
   function confirm(title, message, label, callback) {
@@ -2064,13 +2194,16 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("confirm").showModal();
   }
   function deleteItem() {
-    if (!editing) return;
-    const id = editing.id;
-    confirm("Xóa giao dịch", "Bạn muốn xóa giao dịch này khỏi sổ?", "Xóa", async () => {
-      await persist({ ...data, items: data.items.filter((item) => item.id !== id) });
+    const transferId = editingTransfer?.expense.transferId;
+    const id = editing?.id;
+    if (!transferId && !id) return;
+    const message = transferId ? "Xóa khoản chuyển ở cả tài khoản gửi và tài khoản nhận?" : "Bạn muốn xóa giao dịch này khỏi sổ?";
+    const title = transferId ? "Xóa chuyển khoản" : "Xóa giao dịch";
+    confirm(title, message, transferId ? title : "Xóa", async () => {
+      await persist({ ...data, items: data.items.filter((item) => transferId ? item.transferId !== transferId : item.id !== id) });
       $("editor").close();
       render();
-      notice("Đã xóa giao dịch.");
+      notice(transferId ? "Đã xóa chuyển khoản." : "Đã xóa giao dịch.");
     });
   }
   async function saveLimit(key, value) {
@@ -2128,7 +2261,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const { tab: next, edit, limit, close, filter: selection } = button.dataset;
     if (next) go(next);
     if (button.dataset.ledger) showLedger(button.dataset.ledger);
-    if (button.dataset.transfer) openTransfer(transfersById.get(button.dataset.transfer));
+    if (button.dataset.transfer) openEditor(null, transfersById.get(button.dataset.transfer));
     if (button.dataset.editCredit) {
       cardId = ledger.slice(5);
       const entry = activeCard()?.credits.find((credit) => credit.id === button.dataset.editCredit);
@@ -2291,71 +2424,68 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("transaction-next").onclick = () => stepTransactionPage(1);
   $("edit-form").onsubmit = saveItem;
   $("delete").onclick = deleteItem;
+  const purchaseOnCard = () => cardPurchase || $("item-card").value.startsWith("card:");
+  bindGroupedAmount($("amount"), purchaseOnCard);
+  bindGroupedAmount($("credit-amount"));
+  $("item-card").addEventListener("change", () => {
+    if (purchaseOnCard()) groupAmount($("amount"));
+  });
+  function showEntryChoices(container, key, choices, current, enabled = () => true) {
+    $(container).innerHTML = choices.map(([mode, label]) =>
+      '<button type="button" class="action-row" data-entry-' + key + '="' + mode + '" aria-pressed="'
+      + (mode === current) + '"' + (enabled(mode) ? "" : " disabled") + '>' + label + '</button>').join("");
+  }
+  function setEntryAction(mode) {
+    if (mode === "transfer") return selectTransferMode();
+    if (mode === "saving_out") return openSaving(null, $("item-card").value, true);
+    if (mode === "card_payment" || mode === "card_refund") return openCredit(null, mode === "card_payment" ? "payment" : "refund");
+
+    cardPurchase = mode === "card_purchase" || (mode === "expense" && cardEditorContext());
+    purpose = domain.purposes[mode] ? mode : "";
+    chooseType(purpose ? domain.purposes[purpose][1] : cardPurchase ? "expense" : mode);
+    if (cardPurchase) {
+      const account = $("item-card");
+      if (!account.value && account.options.length === 2) account.selectedIndex = 1;
+      groupAmount($("amount"));
+    }
+  }
+  function actionsForEntryMode(mode) {
+    let actions = entryActions[mode];
+    if (mode === "savings" && !canConvertToExpense() && editing?.purpose !== "saving_out") {
+      actions = actions.filter(([action]) => action === "saving_in");
+    }
+    if (mode === "card" && editing) {
+      actions = actions.filter(([action]) => action === "card_purchase"
+        || (action === "card_payment" && !editing.cardId && canConvertToExpense()));
+    }
+    return actions;
+  }
   $("choose-entry-type").onclick = () => {
-    $("entry-type-options").innerHTML = entryModesForEditor().map(([mode, label]) =>
-      '<button type="button" class="action-row" data-entry-mode="' + mode + '" aria-pressed="'
-      + (mode === (purpose || type)) + '">' + label + '</button>').join("");
+    showEntryChoices("entry-type-options", "mode", entryModes, editorEntryMode(), canChooseMode);
     $("entry-type-dialog").showModal();
   };
   $("entry-type-options").onclick = (event) => {
     const option = event.target.closest("[data-entry-mode]");
-    if (!option) return;
+    if (!option || option.disabled) return;
     const mode = option.dataset.entryMode;
     $("entry-type-dialog").close();
     error("edit-error");
-    if (mode === "transfer") return openTransfer(null, editing);
-    if (mode === "saving_out") return openSaving(null, $("item-card").value, true);
-    if (mode === "card_payment" || mode === "card_refund") {
-      const selectedCard = $("item-card").value;
-      if (!data.cards.some((card) => !isAccountArchived("card:" + card.id) || selectedCard === "card:" + card.id)) {
-        error("edit-error", "Thêm thẻ ở Tài khoản → Thẻ tín dụng trước khi ghi giao dịch này.");
-        $("edit-error").scrollIntoView({ block: "nearest" });
-        return;
-      }
-      return openCredit(null, mode === "card_payment" ? "payment" : "refund");
+    if (!entryActions[mode]) return setEntryAction(mode);
+    const selectedCard = $("item-card").value;
+    if (mode === "card" && !data.cards.some((card) => !isAccountArchived("card:" + card.id) || selectedCard === "card:" + card.id)) {
+      error("edit-error", "Thêm thẻ ở Tài khoản → Thẻ tín dụng trước khi ghi giao dịch này.");
+      $("edit-error").scrollIntoView({ block: "nearest" });
+      return;
     }
-    purpose = domain.purposes[mode] ? mode : "";
-    chooseType(purpose ? domain.purposes[purpose][1] : mode);
+    text("entry-action-title", entryLabels[mode]);
+    showEntryChoices("entry-action-options", "action", actionsForEntryMode(mode), purpose || (cardPurchase ? "card_purchase" : ""));
+    $("entry-action-dialog").showModal();
   };
-  $("transfer-back").onclick = () => {
-    $("amount").value = $("transfer-amount").value;
-    $("date").value = $("transfer-date").value;
-    $("note").value = $("transfer-note").value;
-    $("transfer-dialog").close();
-  };
-  asyncForm("transfer-form", "transfer-error", async () => {
-    const from = $("transfer-from").value;
-    const to = $("transfer-to").value;
-    const amount = amountFrom($("transfer-amount").value);
-    const date = $("transfer-date").value;
-    const note = $("transfer-note").value.trim();
-    if (!from || !to || from === to) throw new Error("Chọn hai tài khoản khác nhau.");
-    if (!domain.isAmount(amount)) throw new Error("Nhập số tiền VND hợp lệ.");
-    if (!domain.validDate(date)) throw new Error("Chọn ngày hợp lệ.");
-    const added = editingTransfer ? 0 : convertingTransfer ? 1 : 2;
-    if (data.items.length + added > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
-
-    const transferId = editingTransfer?.expense.transferId || uid();
-    const fields = { transferId, amount, date, note, category: "other" };
-    const leg = (direction, purpose, key) => {
-      const previous = editingTransfer?.[direction] || (convertingTransfer?.type === direction ? convertingTransfer : null);
-      return { ...fields, id: previous?.id || uid(), type: direction, purpose, accountId: key === "cash" ? key : key.slice(5),
-        ...(previous?.importId ? { importId: previous.importId } : {}) };
-    };
-    const expense = leg("expense", "transfer_out", from);
-    const income = leg("income", "transfer_in", to);
-    const items = data.items.filter((item) => item.transferId !== transferId && item.id !== convertingTransfer?.id);
-    await persist({ ...data, items: [...items, expense, income] });
-    month = date.slice(0, 7);
-    transactionPage = 0;
-    finishTransfer("Đã lưu chuyển khoản.");
-  });
-  $("delete-transfer").onclick = () => {
-    const id = editingTransfer.expense.transferId;
-    confirm("Xóa chuyển khoản", "Xóa khoản chuyển ở cả tài khoản gửi và tài khoản nhận?", "Xóa chuyển khoản", async () => {
-      await persist({ ...data, items: data.items.filter((item) => item.transferId !== id) });
-      finishTransfer("Đã xóa chuyển khoản.");
-    });
+  $("entry-action-options").onclick = (event) => {
+    const option = event.target.closest("[data-entry-action]");
+    if (!option) return;
+    $("entry-action-dialog").close();
+    setEntryAction(option.dataset.entryAction);
   };
   $("export").onclick = exportData;
   $("import").onclick = () => $("file").click();
@@ -2513,9 +2643,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const bankReader = getStatementReader(domain.validDate, domain.isAmount, searchKey);
   let bankRows = [], bankPage = 0, bankFile = "", bankWorking = false, bankSource = "";
   let bankReadGeneration = 0;
-  const bankExisting = () => new Set(data.items.map((row) => row.importId).filter(Boolean));
-  const isBankImport = (item, account) => item.accountId === account && Boolean(item.importId);
-  const bankImportCount = (account) => data.items.reduce((count, item) => count + Number(isBankImport(item, account)), 0);
+  const isCardStatement = () => bankTarget.startsWith("card:");
+  const statementCard = () => isCardStatement() ? data.cards.find((card) => "card:" + card.id === bankTarget) : null;
+  const isStatementImport = (item, key) => Boolean(item.importId) && itemAccountKey(item) === key;
+  function bankExisting() {
+    const ids = new Set(data.items.map((row) => row.importId).filter(Boolean));
+    for (const card of data.cards) for (const credit of card.credits) if (credit.importId) ids.add(credit.importId);
+    return ids;
+  }
+  const cardStatementKinds = { purchase: "Chi bằng thẻ", payment: "Trả nợ thẻ", refund: "Hoàn tiền thẻ" };
+  const cardKindOptions = '<option value="">Chọn loại giao dịch thẻ</option>' + Object.entries(cardStatementKinds)
+    .map(([id, label]) => '<option value="' + id + '">' + label + '</option>').join("");
   const bankPersonOptions = () => '<option value="">Chưa phân loại</option>' +
     personOptions().map(([id, name]) => '<option value="' + id + '">' + enc(name) + '</option>').join("");
   const bankPurposeOptions = () => '<option value="">Thu chi bằng tiền</option>' +
@@ -2562,6 +2700,24 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return history;
   }
 
+  function suggestCardKind(row) {
+    if (row.cardKind && (row.cardKind !== "purchase" || row.type === "expense")) return row.cardKind;
+    const note = searchKey(row.description).replace(/[^a-z0-9]+/g, " ");
+    const refund = /\b(?:hoan tien|hoan tra|refund|reversal|chargeback)\b/.test(note);
+    const payment = /\b(?:thanh toan the|thanh toan du no|tra no the|tra no tin dung|payment received|payment thank you|card payment|repayment|autopay)\b/.test(note);
+    if (row.directionKnown && row.type === "expense") return "purchase";
+    if (!refund && !payment) return "";
+    return refund ? "refund" : "payment";
+  }
+
+  function statementRowKey(date, amount, kind) { return date + "/" + amount + "/" + kind; }
+
+  function existingCardRows(card) {
+    const keys = new Set(card.credits.map((credit) => statementRowKey(credit.date, credit.amount, credit.kind)));
+    for (const item of data.items) if (item.cardId === card.id) keys.add(statementRowKey(item.date, item.amount, "purchase"));
+    return keys;
+  }
+
   function fingerprint(raw) {
     // Stable identity for duplicate review, independent of later edits to a transaction.
     const accumulators = [0x811c9dc5, 0x9e3779b9, 0x4b1d7f2b];
@@ -2579,14 +2735,18 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (bankSource === current) return;
     bankSource = current;
     const existing = bankExisting();
+    const card = statementCard();
+    const knownRows = card ? existingCardRows(card) : null;
+    const source = card ? bankTarget + "/" + current : current;
     const seen = new Map();
     for (const row of bankRows) {
-      const key = fingerprint([current, row.date, row.rawType, row.rawAmount, row.rawNote, row.choices.map((x) => x.amount).join(",")].join("\n"));
+      const key = fingerprint([source, row.date, row.rawType, row.rawAmount, row.rawNote, row.choices.map((x) => x.amount).join(",")].join("\n"));
       const occurrence = (seen.get(key) || 0) + 1;
       seen.set(key, occurrence);
       row.key = "bank-" + key + "-" + occurrence;
       row.duplicate = existing.has(row.key);
-      row.selected = !row.duplicate && (row.userSelected ?? (!row.manual && Boolean(row.type)));
+      row.cardMatch = Boolean(knownRows?.has(statementRowKey(row.date, row.amount, row.cardKind)));
+      row.selected = !row.duplicate && (row.userSelected ?? (!row.manual && !row.cardMatch && Boolean(card ? row.cardKind : row.type)));
     }
   }
 
@@ -2600,8 +2760,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     select.value = row.category;
     select.disabled = !row.type || Boolean(row.purpose);
   }
+  function showStatementRowFields(element, row) {
+    const category = element.querySelector('[data-key="category"]');
+    const member = element.querySelector('[data-key="member"]');
+    const card = isCardStatement();
+    const classified = !card || row.cardKind === "purchase";
+    category.closest("label").hidden = member.closest("label").hidden = !classified;
+    if (classified) bankCategory(row, category);
+    const notes = [row.reason];
+    if (row.cardMatch && !row.duplicate) notes.unshift("Trùng ngày, số tiền và loại với một giao dịch đã ghi. Chỉ chọn nếu là giao dịch khác.");
+    element.querySelector('[data-bank-hint]').textContent = notes.filter(Boolean).join(" ");
+  }
   function renderBankRows() {
-    const imported = bankImportCount(bankTarget);
+    const card = statementCard();
+    const imported = data.items.reduce((count, item) => count + Number(isStatementImport(item, bankTarget)), 0)
+      + (card ? card.credits.filter((credit) => credit.importId).length : 0);
     text("bank-imported-count", imported + " giao dịch");
     $("remove-bank-imports").disabled = bankWorking || !imported;
     const activePeople = new Set(personOptions().map(([id]) => id));
@@ -2620,22 +2793,27 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       + '<label>Nội dung<input data-key="description" maxlength="200" value="' + enc(row.description) + '"></label>'
       + (row.choices.length ? '<p class="empty">Số nhận dạng trên dòng PDF: ' + row.choices.map((choice) => fmt(choice.amount)).join(" · ") + '. Có thể gồm số dư.</p>' : '')
       + '<label>Số tiền (₫)<input data-key="amount" inputmode="numeric" maxlength="17" value="' + (row.amount ? money.format(row.amount) : '') + '"></label>'
-      + '<label>Chiều tiền<select data-key="type"><option value="">Chọn thu hoặc chi</option><option value="income">Thu</option><option value="expense">Chi</option></select></label>'
-      + '<label>Cách ghi sổ<select data-key="purpose">' + bankPurposeOptions() + '</select></label>'
+      + (card ? '<label>Loại giao dịch thẻ<select data-key="cardKind">' + cardKindOptions + '</select></label>'
+        : '<label>Chiều tiền<select data-key="type"><option value="">Chọn thu hoặc chi</option><option value="income">Thu</option><option value="expense">Chi</option></select></label>'
+        + '<label>Cách ghi sổ<select data-key="purpose">' + bankPurposeOptions() + '</select></label>')
       + '<label>Danh mục<select data-key="category"></select></label><p class="empty" data-bank-hint></p>'
       + '<label>Người liên quan<select data-key="member">' + bankPersonOptions() + '</select></label></article>').join("");
     for (const element of $("bank-rows").querySelectorAll("[data-bank-row]")) {
       const row = bankRows[Number(element.dataset.bankRow)];
-      element.querySelector('[data-key="type"]').value = row.type;
-      element.querySelector('[data-key="purpose"]').value = row.purpose;
+      if (card) {
+        element.querySelector('[data-key="cardKind"]').value = row.cardKind;
+        bindGroupedAmount(element.querySelector('[data-key="amount"]'));
+      }
+      else {
+        element.querySelector('[data-key="type"]').value = row.type;
+        element.querySelector('[data-key="purpose"]').value = row.purpose;
+      }
       element.querySelector('[data-key="member"]').value = row.member;
-      bankCategory(row, element.querySelector('[data-key="category"]'));
-      element.querySelector('[data-bank-hint]').textContent = row.reason;
+      showStatementRowFields(element, row);
     }
   }
 
-  $("open-bank").onclick = () => {
-    const next = ledger.slice(5);
+  function openStatement(next) {
     if (bankTarget !== next) {
       bankTarget = next;
       bankReadGeneration++;
@@ -2646,40 +2824,63 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       $("bank-source").value = "";
       text("bank-file-name", "");
     }
-    if (bankTarget && !$("bank-source").value.trim()) $("bank-source").value = primaryAccountName("bank:" + bankTarget);
-    $("bank-destination").hidden = !bankTarget;
-    if (bankTarget) text("bank-destination", "Nhập vào " + primaryAccountName("bank:" + bankTarget));
+    const card = isCardStatement();
+    if (!$("bank-source").value.trim()) $("bank-source").value = ledgerName(next);
+    text("bank-title", card ? "Nhập sao kê thẻ tín dụng" : "Nhập sao kê ngân hàng");
+    text("bank-source-label", card ? "Tên nguồn sao kê" : "Tên ngân hàng hoặc tài khoản");
+    $("bank-source").placeholder = card ? "Ví dụ Sao kê Visa" : "Ví dụ ACB lương vợ";
+    $("bank-destination").hidden = false;
+    text("bank-destination", "Nhập vào " + ledgerName(next));
+    text("bank-help", card ? "Chọn đúng loại giao dịch và số tiền bằng VND. Với PDF, đối chiếu và tích từng dòng muốn lưu."
+      : "Đối chiếu với sao kê gốc. Với PDF, kiểm tra số tiền, chọn thu hoặc chi và tích từng dòng muốn lưu.");
+    if (card) { bankSource = null; bankIdentity(); }
     error("bank-error");
     text("bank-import-status", "");
     $("bank-history").open = false;
     renderBankRows();
     $("bank-dialog").showModal();
-  };
+  }
+  $("open-bank").onclick = () => openStatement(ledger);
+  $("open-card-import").onclick = () => openStatement("card:" + cardId);
   $("remove-bank-imports").onclick = () => {
-    const account = bankTarget;
+    const key = bankTarget;
+    const card = statementCard();
     const before = data;
-    const imports = before.items.filter((item) => isBankImport(item, account));
-    const count = imports.length;
+    const imports = before.items.filter((item) => isStatementImport(item, key));
+    const cardImports = card ? card.credits.filter((credit) => credit.importId) : [];
+    const count = imports.length + cardImports.length;
     if (bankWorking || !count) return;
     const importedTransfers = new Set(imports.map((item) => item.transferId).filter(Boolean));
     const importedIds = new Set(imports.map((item) => item.id));
     const linkedSavings = before.savings.filter((saving) => importedIds.has(saving.depositId));
     const linkedPayments = imports.some((item) => item.purpose === "card_payment");
-    const name = primaryAccountName("bank:" + account);
+    const cardDebits = new Set(cardImports.map((credit) => credit.debitId).filter(Boolean));
+    const name = ledgerName(key);
     const message = "Xóa " + count + " giao dịch nhập từ sao kê của " + name
       + " ở tất cả các tháng? Các giao dịch nhập tay và số dư đầu kỳ bạn đã đặt vẫn được giữ."
       + (importedTransfers.size ? " Cả hai bên của " + importedTransfers.size + " khoản chuyển liên kết sẽ được gỡ." : "")
       + (linkedSavings.length ? " Giữ " + linkedSavings.length + " sổ tiết kiệm và bỏ liên kết với giao dịch bị xóa." : "")
-      + (linkedPayments ? " Khoản trả nợ thẻ đã liên kết cũng sẽ được gỡ." : "");
+      + (linkedPayments ? " Các khoản trả nợ thẻ sẽ được đối chiếu lại theo sao kê đã lưu." : "")
+      + (cardDebits.size ? " Các dòng tiền ra trong tài khoản nguồn vẫn được giữ." : "");
     confirm("Xóa giao dịch đã nhập", message, "Xóa giao dịch", async () => {
       if (data !== before) throw new Error("Sổ đã thay đổi. Hãy kiểm tra lại số giao dịch đã nhập.");
-      const items = data.items.filter((item) => !isBankImport(item, account) && !importedTransfers.has(item.transferId));
+      let items = data.items.filter((item) => !isStatementImport(item, key) && !importedTransfers.has(item.transferId));
+      if (cardDebits.size) items = items.map((item) => cardDebits.has(item.id) ? { ...item, purpose: "transfer_out" } : item);
       const savings = linkedSavings.length ? data.savings.map((saving) => {
         const { depositId, ...details } = saving;
         return importedIds.has(depositId) ? details : saving;
       }) : data.savings;
-      const cards = linkedPayments ? data.cards.map((card) => ({ ...card,
-        credits: card.credits.filter((credit) => !importedIds.has(credit.debitId)) })) : data.cards;
+      const cards = data.cards.map((entry) => {
+        if (entry.id === card?.id && cardImports.length) return { ...entry, credits: entry.credits.filter((credit) => !credit.importId) };
+        if (!linkedPayments) return entry;
+        const credits = entry.credits.flatMap((credit) => {
+          if (!importedIds.has(credit.debitId)) return [credit];
+          if (!credit.importId) return [];
+          const { debitId, ...details } = credit;
+          return [details];
+        });
+        return { ...entry, credits };
+      });
       await persist({ ...data, items, savings, cards });
       bankSource = null;
       bankIdentity();
@@ -2702,15 +2903,19 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     error("bank-error");
     renderBankRows();
     try {
-      const { found, skipped } = await bankReader.read(file);
+      const card = isCardStatement();
+      const { found, skipped } = await bankReader.read(file, card);
       if (generation !== bankReadGeneration) return;
       bankFile = file.name;
       bankSource = null;
       const history = collectHistory();
       bankRows = found.map((row) => {
-        const suggestion = suggest(row.description, row.type, history);
+        const cardKind = card ? suggestCardKind(row) : "";
+        const type = card ? (cardKind === "purchase" ? "expense" : cardKind ? "income" : "") : row.type;
+        const suggestion = suggest(row.description, type, history);
         return { ...row, choices: row.choices || [], rawNote: row.description, rawType: row.type, rawAmount: row.amount,
-          category: suggestion.category, member: "", purpose: "", reason: suggestion.reason };
+          type, cardKind, category: suggestion.category, member: "", purpose: "",
+          reason: card && !cardKind ? "Xác nhận loại giao dịch theo sao kê." : card && type === "income" ? "" : suggestion.reason };
       });
       bankIdentity();
       text("bank-file-name", bankFile + " · " + found.length + " dòng nhận dạng" +
@@ -2745,6 +2950,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         break;
       case "amount": row.amount = amountFrom(field.value); break;
       case "description": row.description = field.value; break;
+      case "cardKind": {
+        row.cardKind = field.value;
+        row.type = row.cardKind === "purchase" ? "expense" : row.cardKind ? "income" : "";
+        const suggestion = suggest(row.description, row.type, collectHistory());
+        row.category = suggestion.category;
+        row.reason = row.cardKind === "purchase" ? suggestion.reason : "";
+        showStatementRowFields(element, row);
+        break;
+      }
       case "purpose": {
         row.purpose = field.value;
         const direction = domain.purposes[row.purpose]?.[1];
@@ -2778,19 +2992,31 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const known = bankExisting();
     const chosen = bankRows.filter((row) => row.selected && !known.has(row.key));
     if (!chosen.length) throw new Error("Chọn ít nhất một dòng mới.");
-    const next = chosen.map((row) => {
-      if (!row.type || !domain.isAmount(row.amount) || (relatedPurpose(row.purpose) && (!row.member || row.member === "shared"))) {
+    const card = statementCard();
+    const items = [];
+    const credits = [];
+    for (const row of chosen) {
+      if (!row.type || !domain.isAmount(row.amount) || (card && (!row.cardKind || row.date > today))
+          || (relatedPurpose(row.purpose) && (!row.member || row.member === "shared"))) {
         bankPage = Math.floor(bankRows.indexOf(row) / BANK_PAGE_SIZE);
         renderBankRows();
-        throw new Error("Kiểm tra dòng ngày " + dateName(row.date) + ": cần chiều tiền, số tiền và người liên quan nếu là khoản hộ hoặc cho mượn.");
+        const requirements = card ? "chọn loại giao dịch thẻ, số tiền và ngày đã phát sinh."
+          : "cần chiều tiền, số tiền và người liên quan nếu là khoản hộ hoặc cho mượn.";
+        throw new Error("Kiểm tra dòng ngày " + dateName(row.date) + ": " + requirements);
       }
-      return { id: uid(), type: row.type, amount: row.amount, date: row.date,
-        category: categories[row.type][row.category] ? row.category : "other", note: row.description.trim(),
-        importId: row.key, accountId: bankTarget, ...(row.member ? { member: row.member } : {}), ...(row.purpose ? { purpose: row.purpose } : {}) };
-    });
-    if (data.items.length + next.length > domain.maxRows) throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
-    await persist({ ...data, items: [...data.items, ...next] });
-    month = next.map((row) => row.date).sort().pop().slice(0, 7);
+      const entry = { id: uid(), amount: row.amount, date: row.date, note: row.description.trim(), importId: row.key };
+      if (card && row.cardKind !== "purchase") credits.push({ ...entry, kind: row.cardKind });
+      else items.push({ ...entry, type: row.type, category: categories[row.type][row.category] ? row.category : "other",
+        ...(card ? { cardId: card.id } : { accountId: bankTarget.slice(5) }), ...(row.member ? { member: row.member } : {}),
+        ...(row.purpose ? { purpose: row.purpose } : {}) });
+    }
+    if (data.items.length + items.length > domain.maxRows || (card && card.credits.length + credits.length > domain.maxRows)) {
+      throw new Error("Sổ đã gần giới hạn 20.000 giao dịch.");
+    }
+    const cards = credits.length ? data.cards.map((entry) => entry.id === card.id
+      ? { ...card, credits: [...card.credits, ...credits] } : entry) : data.cards;
+    await persist({ ...data, items: [...data.items, ...items], cards });
+    month = chosen.map((row) => row.date).sort().pop().slice(0, 7);
     transactionPage = 0;
     bankRows = [];
     bankPage = 0;
@@ -2799,7 +3025,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     renderBankRows();
     $("bank-dialog").close();
     render();
-    notice("Đã nhập " + next.length + " giao dịch.");
+    notice("Đã nhập " + chosen.length + " giao dịch.");
   });
 
   bindAccounts();
@@ -9049,6 +9275,7 @@ function page(data, removedUnassigned = 0) {
         <div class="account-actions">
           <button class="secondary" id="card-purchase">Ghi khoản chi</button>
           <button class="secondary" id="add-credit">Trả thẻ / hoàn tiền</button>
+          <button class="secondary" id="open-card-import"><span class="download-icon" data-icon="upload"></span> Nhập sao kê</button>
         </div>
         <section class="panel">
           <h2>Sao kê</h2>
@@ -9118,14 +9345,19 @@ function page(data, removedUnassigned = 0) {
       <div class="field" id="category-field"><label for="category">Danh mục</label><select id="category"></select></div>
       <div class="field"><label for="date">Ngày</label><input id="date" type="date" min="1900-01-01" max="2999-12-31" required></div>
     </div>
-    <div class="field">
+    <div class="field-pair" id="transfer-fields" hidden>
+      <div class="field"><label for="transfer-from">Tài khoản gửi</label><select id="transfer-from"></select></div>
+      <div class="field"><label for="transfer-to">Tài khoản nhận</label><select id="transfer-to"></select></div>
+    </div>
+    <div class="field" id="editor-person-field">
       <div class="member-heading"><label for="item-member" id="member-label">Chi cho ai?</label>
         <button class="text-button member-add" id="editor-add-person" type="button" aria-haspopup="dialog" hidden><span data-icon="plus" aria-hidden="true"></span>Thêm người liên quan</button>
       </div>
       <select id="item-member"><option value="">Chưa phân loại</option></select>
     </div>
-    <div class="field"><label for="item-card">Tài khoản</label><select id="item-card"></select></div>
+    <div class="field" id="editor-account-field"><label for="item-card" id="editor-account-label">Tài khoản</label><select id="item-card"></select></div>
     <div class="field"><label for="note">Ghi chú</label><textarea id="note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
+    <p class="empty" id="transfer-conversion-note" hidden>Lưu sẽ đổi giao dịch này thành khoản chuyển giữa hai tài khoản và gỡ danh mục, người liên quan đã gán.</p>
     <p id="edit-error" class="error" role="alert" hidden></p>
     <div class="form-actions"><button class="danger" type="button" id="delete" hidden>Xóa</button><button class="primary" id="save-item">Lưu giao dịch</button></div>
   </form>
@@ -9134,26 +9366,9 @@ function page(data, removedUnassigned = 0) {
   <div class="dialog-heading"><h2 id="entry-type-title">Loại giao dịch</h2><button data-close="entry-type-dialog" aria-label="Đóng" data-icon="x"></button></div>
   <div class="group entry-type-options" id="entry-type-options"></div>
 </dialog>
-<dialog id="transfer-dialog" aria-labelledby="transfer-title">
-  <div class="sheet-handle" aria-hidden="true"></div>
-  <div class="dialog-heading"><h2 id="transfer-title">Chuyển khoản</h2><button data-close="transfer-dialog" aria-label="Đóng" data-icon="x"></button></div>
-  <form id="transfer-form">
-    <div class="field"><label for="transfer-from">Tài khoản gửi</label><select id="transfer-from" required></select></div>
-    <div class="field"><label for="transfer-to">Tài khoản nhận</label><select id="transfer-to" required></select></div>
-    <div class="field-pair">
-      <div class="field amount-field"><label for="transfer-amount">Số tiền</label><input id="transfer-amount" inputmode="numeric" placeholder="Nhập số tiền" maxlength="17" required><span aria-hidden="true">₫</span></div>
-      <div class="field"><label for="transfer-date">Ngày</label><input id="transfer-date" type="date" min="1900-01-01" max="2999-12-31" required></div>
-    </div>
-    <div class="field"><label for="transfer-note">Ghi chú</label><textarea id="transfer-note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
-    <p class="empty">Khoản chuyển cập nhật số dư hai tài khoản và nằm ngoài tổng thu chi.</p>
-    <p class="empty" id="transfer-conversion-note" hidden>Khi lưu, khoản chuyển sẽ thay giao dịch cũ. Danh mục và người liên quan của giao dịch cũ sẽ được gỡ.</p>
-    <p id="transfer-error" class="error" role="alert" hidden></p>
-    <div class="form-actions">
-      <button class="secondary" type="button" id="transfer-back">Quay lại</button>
-      <button class="danger" type="button" id="delete-transfer" hidden>Xóa chuyển khoản</button>
-      <button class="primary" id="save-transfer">Lưu chuyển khoản</button>
-    </div>
-  </form>
+<dialog id="entry-action-dialog" aria-labelledby="entry-action-title">
+  <div class="dialog-heading"><h2 id="entry-action-title"></h2><button data-close="entry-action-dialog" aria-label="Đóng" data-icon="x"></button></div>
+  <div class="group entry-type-options" id="entry-action-options"></div>
 </dialog>
 <dialog id="month-dialog" aria-labelledby="month-title">
   <div class="dialog-heading"><h2 id="month-title">Chọn tháng</h2><button data-close="month-dialog" aria-label="Đóng" data-icon="x"></button></div>
@@ -9200,7 +9415,7 @@ function page(data, removedUnassigned = 0) {
   <div class="dialog-heading"><h2 id="bank-title">Nhập sao kê ngân hàng</h2><button data-close="bank-dialog" aria-label="Đóng" data-icon="x"></button></div>
   <form id="bank-form">
     <p class="empty" id="bank-destination" hidden></p>
-    <div class="field"><label for="bank-source">Tên ngân hàng hoặc tài khoản</label><input id="bank-source" maxlength="80" placeholder="Ví dụ ACB lương vợ" required></div>
+    <div class="field"><label for="bank-source" id="bank-source-label">Tên ngân hàng hoặc tài khoản</label><input id="bank-source" maxlength="80" placeholder="Ví dụ ACB lương vợ" required></div>
     <button class="secondary" id="pick-bank-file" type="button">Chọn Excel, CSV hoặc PDF</button>
     <input type="file" id="bank-file" accept=".xlsx,.csv,.pdf" hidden>
     <details class="group bank-history" id="bank-history">
@@ -9211,7 +9426,7 @@ function page(data, removedUnassigned = 0) {
       </div>
     </details>
     <p class="empty" id="bank-file-name" role="status"></p>
-    <p class="empty">Đối chiếu với sao kê gốc. Với PDF, kiểm tra số tiền, chọn thu hoặc chi và tích từng dòng muốn lưu.</p>
+    <p class="empty" id="bank-help"></p>
     <div class="bank-toolbar">
       <p id="bank-selected" role="status"></p><button class="primary" id="bank-save" disabled>Lưu các dòng đã chọn</button>
       <p class="error" id="bank-error" role="alert" hidden></p>
@@ -9261,6 +9476,9 @@ function page(data, removedUnassigned = 0) {
     <div class="field" id="credit-kind-field"><label for="credit-kind">Loại giao dịch thẻ</label><select id="credit-kind"><option value="payment">Trả thẻ</option><option value="refund">Hoàn tiền</option></select></div>
     <div class="field" id="credit-card-field" hidden><label for="credit-card">Thẻ tín dụng</label><select id="credit-card"></select></div>
     <div class="field" id="credit-source-field" hidden><label for="credit-source">Tài khoản trả nợ</label><select id="credit-source"></select></div>
+    <div class="field" id="credit-debit-field" hidden>
+      <label for="credit-debit">Giao dịch cùng ngày và số tiền</label><select id="credit-debit"></select>
+    </div>
     <div class="field"><label for="credit-amount">Số tiền (₫)</label><input id="credit-amount" inputmode="numeric" maxlength="17" required></div>
     <div class="field"><label for="credit-date">Ngày giao dịch</label><input id="credit-date" type="date" required></div>
     <div class="field"><label for="credit-note">Ghi chú</label><textarea id="credit-note" maxlength="200"></textarea></div>
