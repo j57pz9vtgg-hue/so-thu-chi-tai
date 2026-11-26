@@ -509,6 +509,8 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .debt-picker.is-active, .debt-options [aria-pressed=true] { background: var(--mint); }
 .debt-options { margin-bottom: 6px; }
 .debt-options .action-row { padding-inline: 8px; font-weight: 650; }
+.member-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; }
+.member-add { display: inline-flex; align-items: center; gap: 4px; }
 .type-choice svg { width: 16px; height: 16px; }
 @media (max-width: 365px) { .types .type-choice { font-size: 12px; } }
 .empty { padding: 11px 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
@@ -612,6 +614,7 @@ dialog::backdrop { background: #15201a78; }
 .bank-paging { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 12px; }
 @media (max-width: 365px) {
   :root { --side: 14px; }
+  .page-header:has(#new-person:not([hidden])) h1 { font-size: 22px; }
   .hero { padding-inline: 15px; }
   .stat + .stat { padding-left: 10px; }
   .field-pair { grid-template-columns: 1fr; }
@@ -960,7 +963,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const pageTitles = {
     overview: "Sổ Thu Chi", transactions: "Giao dịch", "account-list": "Tài khoản", accounts: "Cài đặt",
     budget: "Ngân sách", cards: "Thẻ tín dụng", savings: "Tiết kiệm",
-    people: "Gia đình", categories: "Danh mục", backup: "Sao lưu dữ liệu", "archived-accounts": "Tài khoản đã ẩn",
+    people: "Gia đình và người liên quan", categories: "Danh mục", backup: "Sao lưu dữ liệu", "archived-accounts": "Tài khoản đã ẩn",
   };
   const accountPages = new Set(["budget", "cards", "savings", "people", "categories", "backup", "archived-accounts"]);
   const pageActions = { "account-list": "new-account", transactions: "open-bank", cards: "new-card", savings: "new-saving", people: "new-person", categories: "new-category" };
@@ -1201,6 +1204,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       .filter(([id]) => includeArchived || id === keep || !isArchived(id));
   }
   const { relatedPurpose } = domain;
+  const personFieldLabels = {
+    loan_out: "Người vay", loan_back: "Người vay",
+    borrow_in: "Người cho vay", borrow_pay: "Người cho vay",
+    proxy_in: "Thu hộ cho ai?", proxy_out: "Chi hộ cho ai?",
+  };
 
   function refreshPeople() {
     const selection = $("member-filter").value;
@@ -1226,15 +1234,18 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   function renderPeople() {
-    const nameRow = (id, name) => glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong>'
-      + (peopleById.has(id) ? '<small>' + (peopleById.get(id).family ? 'Thành viên gia đình' : 'Người liên quan') + '</small>' : '')
-      + '</span>';
-    $("people-list").innerHTML = personOptions().map(([id, name]) => id === "shared"
-      ? '<div class="tx">' + nameRow(id, name) + '</div>'
-      : '<button class="tx" data-person="' + id + '">' + nameRow(id, name) + svg("right") + '</button>').join("");
+    const nameRow = (name) => glyph("person") + '<span class="tx-text"><strong>' + enc(name) + '</strong></span>';
+    const family = [], others = [];
+    for (const [id, name] of personOptions()) {
+      const list = peopleById.get(id)?.family === false ? others : family;
+      list.push(id === "shared" ? '<div class="tx">' + nameRow(name) + '</div>'
+        : '<button class="tx" data-person="' + id + '">' + nameRow(name) + svg("right") + '</button>');
+    }
+    $("family-people").innerHTML = family.join("");
+    $("other-people").innerHTML = others.join("") || '<p class="empty">Chưa có người khác.</p>';
     $("people-archive").hidden = !data.archivedPeople.length;
     $("archived-people-list").innerHTML = personOptions(true).filter(([id]) => isArchived(id)).map(([id, name]) =>
-      '<button class="tx" data-restore-person="' + id + '">' + nameRow(id, name)
+      '<button class="tx" data-restore-person="' + id + '">' + nameRow(name)
       + '<span class="restore-person-label">Khôi phục</span></button>').join("");
     const vouchers = data.items.reduce((total, item) => total + (item.purpose === "voucher"
       && item.date <= today && item.date.startsWith(month) ? item.amount : 0), 0);
@@ -1709,12 +1720,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (picked && options.some(([key]) => key === picked)) $("category").value = picked;
     const purpose = $("item-purpose").value;
     $("category-field").hidden = Boolean(purpose);
-    const debt = purpose.startsWith("loan_") || purpose.startsWith("borrow_");
-    const memberLabel = purpose.startsWith("loan_") ? "Người vay" : purpose.startsWith("borrow_") ? "Người cho vay"
-      : purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?";
+    const personPurpose = relatedPurpose(purpose);
+    const memberLabel = personFieldLabels[purpose]
+      || (purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?");
     text("member-label", memberLabel);
-    text("debt-mode-label", debt ? domain.purposes[purpose][0] : "Vay, cho vay và trả nợ");
-    $("choose-debt").classList.toggle("is-active", debt);
+    text("debt-mode-label", personPurpose ? domain.purposes[purpose][0] : "Vay, cho vay, trả nợ và thu chi hộ");
+    $("choose-debt").classList.toggle("is-active", personPurpose);
+    $("editor-add-person").hidden = !personPurpose;
     const account = $("item-card");
     const selection = account.options.length ? account.value : editorAccount;
     const allowCard = type === "expense" && !purpose;
@@ -1726,14 +1738,18 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (usable.some(([key]) => key === selection)) account.value = selection;
     for (const button of document.querySelectorAll("[data-type]")) button.disabled = Boolean(purpose);
   }
+  function selectEditorPerson(member = "") {
+    const select = $("item-member");
+    select.replaceChildren(new Option("Chưa phân loại", ""),
+      ...personOptions(false, member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
+    select.value = member;
+  }
   function openEditor(item = null) {
     editing = item;
     editorAccount = item ? itemAccountKey(item)
       : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
     $("item-card").replaceChildren();
-    $("item-member").replaceChildren(new Option("Chưa phân loại", ""),
-      ...personOptions(false, item?.member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
-    $("item-member").value = item && item.member || "";
+    selectEditorPerson(item?.member);
     $("item-purpose").value = item && item.purpose || "";
     $("editor-options").open = !editorAccount || Boolean(item && (item.purpose || item.cardId));
     text("editor-title", item ? "Sửa giao dịch" : "Thêm giao dịch");
@@ -2190,11 +2206,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function openPerson(id = "") {
     const person = peopleById.get(id);
     const fixed = Boolean(id && !person);
-    text("person-title", id ? "Thông tin người liên quan" : "Thêm người");
+    const fromEditor = $("editor").open;
+    text("person-title", id ? "Thông tin người liên quan" : fromEditor ? "Thêm người liên quan" : "Thêm người");
     $("person-form").dataset.id = id;
     $("person-name").value = id ? personName(id) : "";
     $("person-name").readOnly = fixed;
-    $("person-kind").value = person && !person.family ? "other" : "family";
+    $("person-kind").value = fromEditor || (person && !person.family) ? "other" : "family";
     $("person-kind-field").hidden = fixed;
     $("person-save").hidden = fixed;
     $("person-remove").hidden = !id;
@@ -2202,6 +2219,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("person-dialog").showModal();
   }
   $("new-person").onclick = () => openPerson();
+  $("editor-add-person").onclick = () => openPerson();
   $("people-list").onclick = (event) => {
     const entry = event.target.closest("[data-person]");
     if (entry) openPerson(entry.dataset.person);
@@ -2235,6 +2253,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   asyncForm("person-form", "person-error", async () => {
     const name = $("person-name").value.trim();
     const activeId = $("person-form").dataset.id;
+    const fromEditor = $("editor").open;
     if (activeId && !peopleById.has(activeId)) return;
     const id = activeId || uid();
     if (!name) throw new Error("Nhập tên người liên quan.");
@@ -2246,7 +2265,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     await persist({ ...data, people });
     refreshPeople();
     $("person-dialog").close();
-    renderPeople();
+    if (fromEditor && $("editor").open) {
+      selectEditorPerson(id);
+      error("edit-error");
+      $("item-member").focus({ preventScroll: true });
+    } else renderPeople();
   });
   for (const [value, [label]] of Object.entries(domain.purposes)) {
     $("item-purpose").add(new Option(label, value));
@@ -8727,7 +8750,7 @@ function page(data, removedUnassigned = 0) {
         <button class="menu-row" data-tab="budget" aria-label="Ngân sách"><span class="glyph" data-icon="pie"></span><span class="tx-text"><strong>Ngân sách</strong><small>Giới hạn theo tháng và danh mục</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="cards" aria-label="Thẻ tín dụng"><span class="glyph" data-icon="card"></span><span class="tx-text"><strong>Thẻ tín dụng</strong><small>Dư nợ, kỳ sao kê và thanh toán</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="savings" aria-label="Tiết kiệm"><span class="glyph" data-icon="stash"></span><span class="tx-text"><strong>Tiết kiệm</strong><small>Tiền gửi, lịch lãi và đáo hạn</small></span><span data-icon="right"></span></button>
-        <button class="menu-row" data-tab="people" aria-label="Gia đình"><span class="glyph" data-icon="people"></span><span class="tx-text"><strong>Gia đình</strong><small>Thành viên, vay và thu chi hộ</small></span><span data-icon="right"></span></button>
+        <button class="menu-row" data-tab="people" aria-label="Gia đình và người liên quan"><span class="glyph" data-icon="people"></span><span class="tx-text"><strong>Gia đình và người liên quan</strong><small>Thành viên, vay và thu chi hộ</small></span><span data-icon="right"></span></button>
         <button class="menu-row" data-tab="categories" aria-label="Danh mục"><span class="glyph" data-icon="tag"></span><span class="tx-text"><strong>Danh mục</strong><small>Danh mục khoản thu và khoản chi</small></span><span data-icon="right"></span></button>
       </div>
       <div class="group">
@@ -8802,10 +8825,14 @@ function page(data, removedUnassigned = 0) {
       <div id="category-entries"></div>
     </section>
     <section data-page="people" hidden>
-      <h2 class="section-title">Thành viên và người liên quan</h2>
-      <div class="group" id="people-list"></div>
+      <div id="people-list">
+        <h2 class="section-title">Gia đình</h2>
+        <div class="group" id="family-people"></div>
+        <h2 class="section-title">Người khác</h2>
+        <div class="group" id="other-people"></div>
+      </div>
       <details class="group" id="people-archive" hidden>
-        <summary class="summary-line">Thành viên đã bỏ<span class="disclosure-arrow" data-icon="right"></span></summary>
+        <summary class="summary-line">Người đã bỏ khỏi danh sách<span class="disclosure-arrow" data-icon="right"></span></summary>
         <div id="archived-people-list"></div>
       </details>
       <details class="group">
@@ -8834,14 +8861,19 @@ function page(data, removedUnassigned = 0) {
       <button type="button" class="type-choice" id="choose-transfer">Chuyển khoản</button>
     </div>
     <button class="secondary debt-picker" id="choose-debt" type="button" aria-haspopup="dialog">
-      <span id="debt-mode-label">Vay, cho vay và trả nợ</span><span data-icon="right"></span>
+      <span id="debt-mode-label">Vay, cho vay, trả nợ và thu chi hộ</span><span data-icon="right"></span>
     </button>
     <div class="field amount-field"><label for="amount">Số tiền</label><input id="amount" inputmode="numeric" placeholder="Nhập số tiền" maxlength="17" required><span aria-hidden="true">₫</span></div>
     <div class="field-pair">
       <div class="field" id="category-field"><label for="category">Danh mục</label><select id="category"></select></div>
       <div class="field"><label for="date">Ngày</label><input id="date" type="date" min="1900-01-01" max="2999-12-31" required></div>
     </div>
-    <div class="field"><label for="item-member" id="member-label">Chi cho ai?</label><select id="item-member"><option value="">Chưa phân loại</option></select></div>
+    <div class="field">
+      <div class="member-heading"><label for="item-member" id="member-label">Chi cho ai?</label>
+        <button class="text-button member-add" id="editor-add-person" type="button" aria-haspopup="dialog" hidden><span data-icon="plus" aria-hidden="true"></span>Thêm người liên quan</button>
+      </div>
+      <select id="item-member"><option value="">Chưa phân loại</option></select>
+    </div>
     <div class="field"><label for="note">Ghi chú</label><textarea id="note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
     <details class="editor-options" id="editor-options">
       <summary class="summary-line">Tùy chọn<span class="disclosure-arrow" data-icon="right"></span></summary>
@@ -8855,12 +8887,14 @@ function page(data, removedUnassigned = 0) {
   </form>
 </dialog>
 <dialog id="debt-dialog" aria-labelledby="debt-title">
-  <div class="dialog-heading"><h2 id="debt-title">Vay, cho vay và trả nợ</h2><button data-close="debt-dialog" aria-label="Đóng" data-icon="x"></button></div>
+  <div class="dialog-heading"><h2 id="debt-title">Vay, cho vay, trả nợ và thu chi hộ</h2><button data-close="debt-dialog" aria-label="Đóng" data-icon="x"></button></div>
   <div class="group debt-options">
     <button type="button" class="action-row" data-debt-purpose="loan_out">Cho vay / cho mượn</button>
     <button type="button" class="action-row" data-debt-purpose="loan_back">Nhận lại tiền đã cho vay</button>
     <button type="button" class="action-row" data-debt-purpose="borrow_in">Vay tiền</button>
     <button type="button" class="action-row" data-debt-purpose="borrow_pay">Trả nợ vay</button>
+    <button type="button" class="action-row" data-debt-purpose="proxy_in">Thu hộ</button>
+    <button type="button" class="action-row" data-debt-purpose="proxy_out">Chi hộ</button>
   </div>
   <button class="text-button" type="button" data-debt-purpose="">Quay về thu chi thông thường</button>
 </dialog>
