@@ -60,6 +60,107 @@ function model() {
     return end.toISOString().slice(0, 10);
   }
 
+  function shiftMonth(month, offset) {
+    return cycleDate(month, offset, 1).slice(0, 7);
+  }
+
+  const dayMilliseconds = 86400000;
+  const firstCardBoundary = ["1899-12", "1899-12-31"];
+  const dayNumber = (date) => Date.parse(date) / dayMilliseconds;
+  function monthNumber(month) {
+    const [year, ordinal] = month.split("-").map(Number);
+    return year * 12 + ordinal;
+  }
+
+  function hasCycleSpacing([previousMonth, previousClose], [nextMonth, nextClose]) {
+    return dayNumber(nextClose) - dayNumber(previousClose) >= monthNumber(nextMonth) - monthNumber(previousMonth);
+  }
+
+  function cardCycles(card) {
+    const overrides = { ...card.closingMonths };
+    const savedDates = new Set(Object.values(overrides));
+    const guesses = new Map();
+    for (const date of card.closings) {
+      if (savedDates.has(date)) continue;
+      const calendarMonth = date.slice(0, 7);
+      const day = dayNumber(date);
+      const nearest = [-2, -1, 0].map((offset) => shiftMonth(calendarMonth, offset)).filter(validMonth)
+        .map((month) => ({ month, distance: Math.abs(day - dayNumber(cycleDate(month, 1, card.closeDay))) }))
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (!nearest || own(overrides, nearest.month)) continue;
+      if (!guesses.has(nearest.month)) guesses.set(nearest.month, []);
+      guesses.get(nearest.month).push({ date, distance: nearest.distance });
+    }
+    // Saved month choices take precedence when a legacy date would reverse the order of two close dates.
+    const explicit = Object.entries(overrides).sort(([a], [b]) => a.localeCompare(b));
+    const cycles = { ...overrides };
+    let nextOverride = 0;
+    let previous = firstCardBoundary;
+    for (const [month, candidates] of [...guesses].sort(([a], [b]) => a.localeCompare(b))) {
+      while (nextOverride < explicit.length && explicit[nextOverride][0] < month) {
+        previous = explicit[nextOverride];
+        nextOverride++;
+      }
+      const next = explicit[nextOverride];
+      const best = candidates.sort((a, b) => a.distance - b.distance || b.date.localeCompare(a.date)).find(({ date }) => {
+        const entry = [month, date];
+        return hasCycleSpacing(previous, entry) && (!next || hasCycleSpacing(entry, next));
+      });
+      if (!best) continue;
+      cycles[month] = best.date;
+      previous = [month, best.date];
+    }
+    return cycles;
+  }
+
+  function cardBoundary(card, month, cycles) {
+    const scheduled = cycleDate(month, 1, card.closeDay);
+    const actual = cycles[month] || "";
+    if (actual) return { closing: actual, scheduled, actual };
+    if (month === firstCardBoundary[0]) return { closing: firstCardBoundary[1], scheduled, actual };
+    let before = "";
+    let after = "";
+    for (const slot of Object.keys(cycles)) {
+      if (slot < month && (!before || slot > before)) before = slot;
+      if (slot > month && (!after || slot < after)) after = slot;
+    }
+    const slot = monthNumber(month);
+    let day = dayNumber(scheduled);
+    // Leave at least one day of coverage for every month, even after the scheduled close day changes.
+    const [earlierMonth, earlierClose] = before ? [before, cycles[before]] : firstCardBoundary;
+    day = Math.max(day, dayNumber(earlierClose) + slot - monthNumber(earlierMonth));
+    if (after) day = Math.min(day, dayNumber(cycles[after]) + slot - monthNumber(after));
+    return { closing: new Date(day * dayMilliseconds).toISOString().slice(0, 10), scheduled, actual };
+  }
+
+  function cardCycle(card, month, cycles = cardCycles(card)) {
+    const previous = cardBoundary(card, shiftMonth(month, -1), cycles).closing;
+    return { previous, ...cardBoundary(card, month, cycles) };
+  }
+
+  function cardMonthForDate(card, date) {
+    const calendarMonth = date.slice(0, 7);
+    const cycles = cardCycles(card);
+    const savedMonth = Object.keys(cycles).find((month) => cycles[month] === date);
+    if (savedMonth) return savedMonth;
+    for (const offset of [-2, -1, 0, 1]) {
+      const month = shiftMonth(calendarMonth, offset);
+      if (!validMonth(month)) continue;
+      const cycle = cardCycle(card, month, cycles);
+      if (cycle.previous < date && date <= cycle.closing) return month;
+    }
+    const firstMonth = "1900-01";
+    let start = 0;
+    let last = monthNumber("2999-12") - monthNumber(firstMonth);
+    while (start < last) {
+      const middle = Math.floor((start + last) / 2);
+      const month = shiftMonth(firstMonth, middle);
+      if (cardBoundary(card, month, cycles).closing < date) start = middle + 1;
+      else last = middle;
+    }
+    return shiftMonth(firstMonth, start);
+  }
+
   function dueDate(close, day) {
     const candidate = cycleDate(close, 0, day);
     return candidate > close ? candidate : cycleDate(close, 1, day);
@@ -153,11 +254,21 @@ function model() {
           || !validDay(card.closeDay) || !validDay(card.dueDay)) invalid();
       ids.add(card.id);
       const closings = list(card.closings, 1200);
-      if (!closings.every(validDate) || new Set(closings).size !== closings.length) invalid();
+      const closingDates = new Set(closings);
+      if (!closings.every(validDate) || closingDates.size !== closings.length) invalid();
+      const closingMonths = {};
+      if (card.closingMonths !== undefined && !object(card.closingMonths)) invalid();
+      let prior = firstCardBoundary;
+      for (const [month, close] of Object.entries(card.closingMonths || {}).sort(([a], [b]) => a.localeCompare(b))) {
+        const entry = [month, close];
+        if (!validMonth(month) || !closingDates.has(close) || !hasCycleSpacing(prior, entry)) invalid();
+        closingMonths[month] = close;
+        prior = entry;
+      }
       const dueDates = {};
       if (card.dueDates !== undefined && !object(card.dueDates)) invalid();
       for (const [close, due] of Object.entries(card.dueDates || {})) {
-        if (!closings.includes(close) || !validDate(due) || due <= close) invalid();
+        if (!closingDates.has(close) || !validDate(due) || due <= close) invalid();
         dueDates[close] = due;
       }
       const creditIds = new Set();
@@ -172,7 +283,8 @@ function model() {
         return { id: credit.id, kind: credit.kind, date: credit.date, amount: credit.amount, note: credit.note,
           ...(debitId ? { debitId } : {}), ...(importId ? { importId } : {}) };
       });
-      return { id: card.id, name: card.name, closeDay: card.closeDay, dueDay: card.dueDay, closings, dueDates, credits };
+      return { id: card.id, name: card.name, closeDay: card.closeDay, dueDay: card.dueDay, closings, dueDates, credits,
+        ...(card.closingMonths !== undefined ? { closingMonths } : {}) };
     });
   }
 
@@ -406,7 +518,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categoryDefinitions, deleteCategory, deletePerson, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
+  return { categoryDefinitions, deleteCategory, deletePerson, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, shiftMonth, cardCycles, cardCycle, cardMonthForDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
 }
 
 const css = `
@@ -574,8 +686,7 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 }
 .filters.is-card { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .filters.is-card button { font-size: 13px; }
-.card-cycle-controls { margin-bottom: 12px; }
-.card-cycle-controls p { margin: 7px 0 0; }
+.card-period-range { margin: 0 0 12px; }
 .card-period-facts { margin: 8px 0 0; }
 .card-period-facts .summary-line { min-height: 44px; font-size: 13px; }
 .card-ledger-actions { margin: 0 0 12px; }
@@ -1302,7 +1413,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
   const uid = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   let cardId = "";
-  let selectedClosing = "";
+  let cardMonth = month;
   let cardReport = null;
   let editingCredit = null;
   let convertingPayment = null;
@@ -1429,36 +1540,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   function renderCardPeriod(card) {
-    const closings = card.closings.slice().sort().reverse();
-    if (selectedClosing !== "open" && selectedClosing !== "month" && !closings.includes(selectedClosing)) {
-      selectedClosing = closings[0] || "open";
-    }
-    $("statement-select").replaceChildren(new Option("Kỳ hiện tại", "open"),
-      ...closings.map((date) => new Option("Chốt " + dateName(date), date)), new Option("Theo tháng", "month"));
-    $("statement-select").value = selectedClosing;
-    const monthly = selectedClosing === "month";
-    $("month-controls").hidden = !monthly;
-    $("card-period-range").hidden = monthly;
-    $("statement").hidden = monthly;
-    if (monthly) return null;
-
-    const current = selectedClosing === "open";
-    const closing = current ? today : selectedClosing;
-    const scheduled = domain.cycleDate(today, 0, card.closeDay);
-    const previous = current ? closings.find((date) => date <= today)
-      || (scheduled < today ? scheduled : domain.cycleDate(today, -1, card.closeDay)) : "";
+    const { closing, previous, actual } = domain.cardCycle(card, cardMonth);
     const report = domain.statement(card, data.items, closing, today, data.openings, previous);
-    text("card-period-range", report.previous >= closing ? "Kỳ mới sau " + dateName(report.previous)
-      : "Sau " + dateName(report.previous) + " đến " + dateName(closing));
+    const first = new Date(previous + "T00:00:00Z");
+    first.setUTCDate(first.getUTCDate() + 1);
+    text("card-period-range", "Từ " + dateName(first.toISOString().slice(0, 10)) + " đến " + dateName(closing));
     text("period-opening-label", "Dư nợ đầu kỳ");
-    text("period-ending-label", current ? "Dư nợ hiện tại" : "Dư tại ngày chốt");
+    text("period-ending-label", closing > today ? "Dư nợ dự kiến" : "Dư tại ngày chốt");
     text("period-opening", fmt(report.opening));
     text("period-ending", fmt(report.closingBalance));
 
-    const due = current ? "" : card.dueDates[closing] || domain.dueDate(closing, card.dueDay);
-    const dueDetails = due ? detail("Hạn thanh toán", dateName(due))
-      + detail(report.outstanding > 0 && today > due ? "Còn phải trả · Quá hạn" : "Còn phải trả", fmt(report.outstanding)) : "";
-    $("statement").innerHTML = dueDetails
+    const due = card.dueDates[closing] || domain.dueDate(closing, card.dueDay);
+    const dueLabel = actual ? "Hạn thanh toán" : "Hạn thanh toán dự kiến";
+    const remainingLabel = actual && report.outstanding > 0 && today > due ? "Còn phải trả · Quá hạn" : "Còn phải trả";
+    $("statement").innerHTML = detail(dueLabel, dateName(due))
+      + (closing <= today ? detail(remainingLabel, fmt(report.outstanding)) : "")
       + '<details><summary class="summary-line">Chi tiết kỳ sao kê<span class="disclosure-arrow">' + svg("right") + '</span></summary>'
       + detail("Chi trong kỳ", fmt(report.spend)) + detail("Trả thẻ trong kỳ", fmt(report.paid))
       + detail("Hoàn tiền trong kỳ", fmt(report.refunded))
@@ -1468,10 +1564,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
 
   function showClosingDetails() {
     const card = activeCard();
-    const scheduled = domain.cycleDate(today, 0, card.closeDay);
-    const lastScheduled = scheduled <= today ? scheduled : domain.cycleDate(today, -1, card.closeDay);
-    const mostRecent = card.closings.reduce((latest, date) => date <= today && date > latest ? date : latest, "");
-    $("close-date").value = domain.validDate(selectedClosing) ? selectedClosing : lastScheduled > mostRecent ? lastScheduled : today;
+    const { closing } = domain.cardCycle(card, cardMonth);
+    $("close-date").value = closing <= today ? closing : "";
+    text("card-closing-month", monthName(cardMonth));
     updateClosingDue();
     error("close-error");
     $("card-closing-dialog").showModal();
@@ -1481,7 +1576,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const card = activeCard();
     const date = $("close-date").value;
     $("close-due").value = domain.validDate(date) ? card.dueDates[date] || domain.dueDate(date, card.dueDay) : "";
-    $("remove-closing").hidden = !card.closings.includes(date);
+    $("remove-closing").hidden = date !== domain.cardCycle(card, cardMonth).actual || !date;
   }
 
   function replaceCard(card) {
@@ -1660,11 +1755,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   function bindAccounts() {
-    $("statement-select").onchange = () => {
-      selectedClosing = $("statement-select").value;
-      transactionPage = 0;
-      render();
-    };
     $("show-card-closing").onclick = showClosingDetails;
     $("close-date").onchange = updateClosingDue;
     $("new-card").onclick = () => openCard();
@@ -1691,11 +1781,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("remove-closing").onclick = () => {
       const card = activeCard();
       const closing = $("close-date").value;
-      if (!card.closings.includes(closing)) return;
+      if (closing !== domain.cardCycle(card, cardMonth).actual || !closing) return;
       confirm("Bỏ mốc chốt", "Bỏ mốc chốt đã chọn? Các giao dịch vẫn được giữ.", "Bỏ mốc", async () => {
         const dueDates = { ...card.dueDates };
+        const closingMonths = { ...card.closingMonths };
         delete dueDates[closing];
-        await replaceCard({ ...card, dueDates, closings: card.closings.filter((date) => date !== closing) });
+        delete closingMonths[cardMonth];
+        await replaceCard({ ...card, closingMonths, dueDates, closings: card.closings.filter((date) => date !== closing) });
         $("card-closing-dialog").close();
         render();
       });
@@ -1728,9 +1820,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       const card = { id: uid(), closings: [], dueDates: {}, credits: [], ...old, name: $("card-name").value.trim(),
         closeDay: Number($("card-close-day").value), dueDay: Number($("card-due-day").value) };
       if (!card.name) throw new Error("Nhập tên thẻ.");
+      if (old && old.closeDay !== card.closeDay) card.closingMonths = domain.cardCycles(old);
       await replaceCard(card);
       cardId = card.id;
-      if (!old) selectedClosing = "";
       $("card-dialog").close();
       if (old && tab === "transactions") text("page-title", card.name);
       render();
@@ -1741,9 +1833,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       if (!domain.validDate(date) || date > today) throw new Error("Chọn ngày chốt không muộn hơn hôm nay.");
       const due = $("close-due").value || domain.dueDate(date, card.dueDay);
       if (!domain.validDate(due) || due <= date) throw new Error("Ngày đến hạn phải sau ngày chốt.");
-      const closings = card.closings.includes(date) ? card.closings : [...card.closings, date];
-      await replaceCard({ ...card, closings, dueDates: { ...card.dueDates, [date]: due } });
-      selectedClosing = date;
+      const { previous, actual } = domain.cardCycle(card, cardMonth);
+      const next = domain.cardCycle(card, domain.shiftMonth(cardMonth, 1)).closing;
+      if (date <= previous || date >= next) throw new Error("Ngày chốt phải nằm giữa ngày chốt của kỳ trước và kỳ sau.");
+      if (Object.entries(domain.cardCycles(card)).some(([key, closing]) => key !== cardMonth && closing === date)) {
+        throw new Error("Ngày chốt này đã thuộc kỳ sao kê khác.");
+      }
+      const dueDates = { ...card.dueDates };
+      if (actual && actual !== date) delete dueDates[actual];
+      dueDates[date] = due;
+      const closings = [...new Set([...card.closings.filter((value) => value !== actual), date])];
+      await replaceCard({ ...card, closings, closingMonths: { ...card.closingMonths, [cardMonth]: date }, dueDates });
       transactionPage = 0;
       $("card-closing-dialog").close();
       render();
@@ -1782,7 +1882,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       await persist({ ...data, cards, items });
       $("credit-dialog").close();
       $("editor").close();
-      month = date.slice(0, 7);
+      showTransactionDate(date, "card:" + card.id);
       transactionPage = 0;
       render();
       notice("Đã lưu giao dịch thẻ.");
@@ -1939,31 +2039,42 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
 
   function renderPeriod() {
     const card = ledger.startsWith("card:");
-    $("card-cycle-controls").hidden = $("card-period-actions").hidden = $("card-ledger-actions").hidden = !card;
+    $("card-period-range").hidden = $("card-period-actions").hidden = $("card-ledger-actions").hidden = !card;
     $("statement").hidden = !card;
     $("ledger-filters").classList.toggle("is-card", card);
     for (const button of $("ledger-filters").querySelectorAll("[data-card-filter]")) button.hidden = !card;
     for (const button of $("ledger-filters").querySelectorAll("[data-account-filter]")) button.hidden = card;
     text("ledger-expense-filter", card ? "Chi thẻ" : "Chi");
     text("account-archive", card ? "Ẩn thẻ" : "Ẩn tài khoản");
-    cardReport = card ? renderCardPeriod(activeCard()) : null;
-    $("period-edit").hidden = Boolean(cardReport);
-    if (cardReport) return;
-    const anchor = domain.latestOpening(data.openings, ledger, month);
-    text("period-opening-label", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
-    text("period-ending-label", card ? "Dư nợ cuối kỳ" : "Số dư cuối kỳ");
+    const period = displayedMonth();
+    const anchor = domain.latestOpening(data.openings, ledger, period);
+    text("period-edit", card ? "Nhập dư nợ đầu tháng" : "Nhập số dư đầu kỳ");
+    if (card) {
+      const selected = activeCard();
+      let opening = "";
+      if (anchor) {
+        const previousMonthEnd = domain.cycleDate(period + "-01", -1, 31);
+        const charges = data.items.filter((item) => item.cardId === selected.id);
+        opening = String(anchor.month === period ? anchor.amount : domain.cardBalance(selected, charges, data.openings, previousMonthEnd));
+      }
+      $("period-edit").dataset.value = opening;
+      cardReport = renderCardPeriod(selected);
+      return;
+    }
+    cardReport = null;
+    text("period-opening-label", "Số dư đầu kỳ");
+    text("period-ending-label", "Số dư cuối kỳ");
     let opening = anchor ? anchor.amount : 0;
     let movement = 0;
     for (const item of itemsInLedger(ledger, data.items)) {
       const itemMonth = item.date.slice(0, 7);
       if (item.purpose === "voucher" || itemMonth > month) continue;
-      const delta = (item.type === "income" ? 1 : -1) * (card ? -1 : 1) * item.amount;
+      const delta = (item.type === "income" ? 1 : -1) * item.amount;
       if (anchor && itemMonth >= anchor.month && itemMonth < month) opening += delta;
       if (itemMonth === month) movement += delta;
     }
     text("period-opening", anchor ? fmt(opening) : "Chưa nhập");
     text("period-ending", anchor ? fmt(opening + movement) : "—");
-    text("period-edit", card ? "Nhập dư nợ đầu kỳ" : "Nhập số dư đầu kỳ");
     $("period-edit").dataset.value = anchor ? String(opening) : "";
   }
 
@@ -1991,9 +2102,10 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (tab === "savings") return renderSavings();
     if (tab === "accounts") return renderSettings();
     if (tab === "archived-accounts") return renderArchivedAccounts();
-    text("month-label", monthName(month));
-    $("previous").disabled = month === "1900-01";
-    $("next").disabled = month === "2999-12";
+    const period = displayedMonth();
+    text("month-label", monthName(period));
+    $("previous").disabled = period === "1900-01";
+    $("next").disabled = period === "2999-12";
     if (tab === "account-list") return renderAccountList();
     const summary = stats();
     if (tab === "overview") renderOverview(summary);
@@ -2006,8 +2118,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const nested = settingsPages.has(tab);
     const cardLedger = tab === "transactions" && ledger.startsWith("card:");
     const showAdd = tab === "overview" || (tab === "transactions" && !cardLedger) || tab === "people";
-    $("month-controls").hidden = !["overview", "account-list", "transactions", "budget", "people"].includes(tab)
-      || (cardLedger && selectedClosing !== "month");
+    $("month-controls").hidden = !["overview", "account-list", "transactions", "budget", "people"].includes(tab);
     $("account-back").hidden = !nested;
     $("ledger-back").hidden = tab !== "transactions";
     $("account-subtabs").hidden = !accountTabs.has(tab);
@@ -2031,10 +2142,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     window.scrollTo(0, 0);
     if (moveFocus) $("page-title").focus({ preventScroll: true });
   }
+  function viewingCardLedger() { return tab === "transactions" && ledger.startsWith("card:"); }
+  function displayedMonth() { return viewingCardLedger() ? cardMonth : month; }
+  function setDisplayedMonth(value) {
+    if (viewingCardLedger()) cardMonth = value;
+    else month = value;
+    transactionPage = 0;
+  }
+  function showTransactionDate(date, account = ledger) {
+    if (viewingCardLedger()) {
+      if (account === ledger) cardMonth = domain.cardMonthForDate(activeCard(), date);
+    } else month = date.slice(0, 7);
+  }
   function stepMonth(delta) {
-    const [year, current] = month.split("-").map(Number);
-    const next = localDate(new Date(year, current - 1 + delta, 1)).slice(0, 7);
-    if (domain.validMonth(next)) { month = next; transactionPage = 0; render(); }
+    const next = domain.shiftMonth(displayedMonth(), delta);
+    if (domain.validMonth(next)) { setDisplayedMonth(next); render(); }
   }
   const entryModes = [
     ["income", "Thu tiền"], ["expense", "Chi tiền"], ["loan", "Cho vay"], ["borrow", "Đi vay"],
@@ -2168,7 +2290,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("save-item").disabled = true;
     try {
       await persist({ ...data, items });
-      month = date.slice(0, 7);
+      showTransactionDate(date);
       transactionPage = 0;
       $("editor").close();
       render();
@@ -2317,7 +2439,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     }
   });
   $("month-picker").onclick = () => {
-    $("pick-month").value = month;
+    $("pick-month").value = displayedMonth();
+    text("month-title", viewingCardLedger() ? "Chọn kỳ sao kê" : "Chọn tháng");
     error("month-error");
     $("month-dialog").showModal();
   };
@@ -2325,8 +2448,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     event.preventDefault();
     const selected = $("pick-month").value;
     if (!domain.validMonth(selected)) return error("month-error", "Chọn tháng hợp lệ.");
-    month = selected;
-    transactionPage = 0;
+    setDisplayedMonth(selected);
     $("month-dialog").close();
     render();
   };
@@ -2363,7 +2485,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const card = key.startsWith("card:");
     if (card) {
       cardId = key.slice(5);
-      selectedClosing = "";
+      cardMonth = domain.cardMonthForDate(activeCard(), today);
     }
     $("ledger-back").dataset.tab = card ? "cards" : "account-list";
     text("ledger-back-label", card ? "Thẻ tín dụng" : "Tài khoản");
@@ -2422,13 +2544,14 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   });
   $("period-edit").onclick = () => {
     const card = ledger.startsWith("card:");
-    text("opening-title", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
-    text("opening-context", ledgerName(ledger) + " · " + monthName(month));
-    text("opening-hint", card ? "Nhập số dương nếu còn nợ, số âm nếu thẻ đang dư tiền."
+    const period = displayedMonth();
+    text("opening-title", card ? "Dư nợ đầu tháng" : "Số dư đầu kỳ");
+    text("opening-context", ledgerName(ledger) + " · " + monthName(period));
+    text("opening-hint", card ? "Nhập dư nợ trước giao dịch ngày " + dateName(period + "-01") + ". Dùng số âm nếu thẻ đang dư tiền."
       : "Nhập số tiền thực tế trước giao dịch đầu tiên của tháng. Có thể nhập số âm.");
     const periodValue = $("period-edit").dataset.value;
     $("opening-amount").value = periodValue ? money.format(Number(periodValue)) : "";
-    $("opening-remove").hidden = !data.openings.some((entry) => entry.key === ledger && entry.month === month);
+    $("opening-remove").hidden = !data.openings.some((entry) => entry.key === ledger && entry.month === period);
     error("opening-error");
     $("opening-options").showModal();
   };
@@ -2437,14 +2560,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const num = amountFrom(raw.startsWith("-") ? raw.slice(1) : raw);
     const amount = raw.startsWith("-") ? -num : num;
     if (!Number.isSafeInteger(amount) || Math.abs(amount) > domain.maxAmount) throw new Error("Nhập số dư VND hợp lệ.");
-    const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== month);
-    await persist({ ...data, openings: [...openings, { key: ledger, month, amount }] });
+    const period = displayedMonth();
+    const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== period);
+    await persist({ ...data, openings: [...openings, { key: ledger, month: period, amount }] });
     closeMonthOpening();
   });
   $("opening-remove").onclick = async () => {
     $("opening-remove").disabled = true;
     try {
-      const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== month);
+      const openings = data.openings.filter((entry) => entry.key !== ledger || entry.month !== displayedMonth());
       await persist({ ...data, openings });
       closeMonthOpening();
     } catch (err) { error("opening-error", err.message); }
@@ -3051,7 +3175,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const cards = credits.length ? data.cards.map((entry) => entry.id === card.id
       ? { ...card, credits: [...card.credits, ...credits] } : entry) : data.cards;
     await persist({ ...data, items: [...data.items, ...items], cards });
-    month = chosen.map((row) => row.date).sort().pop().slice(0, 7);
+    showTransactionDate(chosen.map((row) => row.date).sort().pop(), bankTarget);
     transactionPage = 0;
     bankRows = [];
     bankPage = 0;
@@ -9226,11 +9350,7 @@ function page(data, removedUnassigned = 0) {
       <div class="group" id="account-entries"></div>
     </section>
     <section data-page="transactions" hidden>
-      <div class="card-cycle-controls" id="card-cycle-controls" hidden>
-        <label for="statement-select">Kỳ sao kê</label>
-        <select id="statement-select"></select>
-        <p class="account-balance-date" id="card-period-range"></p>
-      </div>
+      <p class="account-balance-date card-period-range" id="card-period-range" hidden></p>
       <section class="panel period-summary" id="period">
         <dl class="period-values">
           <div><dt id="period-opening-label">Số dư đầu kỳ</dt><dd id="period-opening"></dd></div>
@@ -9479,6 +9599,7 @@ function page(data, removedUnassigned = 0) {
 </dialog>
 <dialog id="card-closing-dialog" aria-labelledby="card-closing-title">
   <div class="dialog-heading"><h2 id="card-closing-title">Chốt sao kê</h2><button data-close="card-closing-dialog" aria-label="Đóng" data-icon="x"></button></div>
+  <p class="account-balance-date" id="card-closing-month"></p>
   <form id="closing-form">
     <div class="field"><label for="close-date">Ngày chốt thực tế</label><input id="close-date" type="date" required></div>
     <div class="field"><label for="close-due">Ngày đến hạn của kỳ này</label><input id="close-due" type="date"></div>
