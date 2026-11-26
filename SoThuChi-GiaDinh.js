@@ -173,14 +173,15 @@ function model() {
           || saving.rate < 0 || saving.rate > 100 || !validDate(saving.start)
           || !validDate(saving.maturity) || saving.maturity <= saving.start) invalid();
       ids.add(saving.id);
-      const { id, bank, name, principal, rate, start, maturity, settled } = saving;
+      const { id, bank, name, principal, rate, start, maturity, settled, depositId } = saving;
       const payout = saving.payout === undefined ? "maturity" : saving.payout;
       const autoSettle = saving.autoSettle === undefined ? false : saving.autoSettle;
       if (typeof payout !== "string" || !own(payoutLabels, payout) || typeof autoSettle !== "boolean") invalid();
       if (settled !== null && (!object(settled) || !validDate(settled.date) || settled.date < start
           || (settled.interest !== 0 && !isAmount(settled.interest)))) invalid();
+      if (depositId !== undefined && !validId(depositId)) invalid();
       return { id, bank, name, principal, rate, start, maturity, payout, autoSettle,
-        settled: settled && { date: settled.date, interest: settled.interest } };
+        settled: settled && { date: settled.date, interest: settled.interest }, ...(depositId ? { depositId } : {}) };
     });
   }
 
@@ -276,6 +277,17 @@ function model() {
     for (const { expense: from, income: to } of transferPairs.values()) {
       if (!from || !to || from.accountId === to.accountId || from.amount !== to.amount
           || from.date !== to.date || from.note !== to.note || (from.importId && to.importId)) invalid();
+    }
+    const deposits = savings.filter((saving) => saving.depositId);
+    if (deposits.length) {
+      const depositIds = new Set(deposits.map((saving) => saving.depositId));
+      if (depositIds.size !== deposits.length) invalid();
+      const itemsById = new Map(items.filter((item) => depositIds.has(item.id)).map((item) => [item.id, item]));
+      for (const saving of deposits) {
+        const deposit = itemsById.get(saving.depositId);
+        if (!deposit?.accountId || deposit.purpose !== "saving_out" || deposit.amount !== saving.principal
+            || deposit.date !== saving.start) invalid();
+      }
     }
     const budgets = {};
     for (const [month, limits] of Object.entries(input.budgets)) {
@@ -440,6 +452,10 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .menu-row + .menu-row, .tx + .tx, .action-row + .action-row, .limit-row + .limit-row { border-top: 1px solid var(--line); }
 .menu-row strong { display: block; font-size: 16px; }
 .menu-row small { display: block; font-size: 13px; color: var(--muted); margin-top: 3px; line-height: 1.3; }
+.account-balance-date { color: var(--muted); font-size: 13px; margin: 0; }
+.account-list-balance {
+  min-width: 0; max-width: 45%; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
 .menu-row > span:last-child svg, .action-row > span:last-child svg { width: 16px; height: 16px; }
 .action-row > :last-child { margin-left: auto; }
 .glyph {
@@ -1064,9 +1080,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         + signed(incoming ? item.amount : -item.amount) + '</span></button>';
     }).join("");
   }
-  function renderOverview(monthSummary) {
+  function balanceDate() {
     const end = domain.cycleDate(month + "-01", 0, 31);
-    const date = end < today ? end : today;
+    return end < today ? end : today;
+  }
+  function renderOverview(monthSummary) {
+    const date = balanceDate();
     const summary = monthSummary.items[0]?.date > date
       ? summarizeSpending(monthSummary.items.filter((item) => item.date <= date)) : monthSummary;
     const balances = accountBalancesAt(date);
@@ -1381,6 +1400,37 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     }).join("") || '<p class="empty">Chưa có sổ tiết kiệm.</p>';
   }
 
+  function savingDeposit(saving) {
+    return saving?.depositId ? data.items.find((item) => item.id === saving.depositId) : null;
+  }
+
+  function matchingSavingDeposits(source, date, amount) {
+    if (!source || !domain.validDate(date) || !domain.isAmount(amount)) return [];
+    const linked = new Set(data.savings.map((saving) => saving.depositId));
+    return data.items.filter((item) => item.date === date && item.amount === amount && item.type === "expense"
+      && itemAccountKey(item) === source && !item.transferId && !linked.has(item.id)
+      && (!item.purpose || item.purpose === "saving_out" || item.purpose === "transfer_out"));
+  }
+
+  function updateSavingDepositOptions() {
+    const deposit = savingDeposit(editingSaving);
+    const source = $("saving-source").value;
+    const matched = $("saving-deposit");
+    const selected = matched.value;
+    const preserveImport = Boolean(source && deposit?.importId);
+    $("saving-principal").readOnly = preserveImport;
+    $("saving-start").readOnly = preserveImport;
+    const matches = deposit ? [] : matchingSavingDeposits(source, $("saving-start").value, amountFrom($("saving-principal").value));
+    $("saving-deposit-field").hidden = !matches.length;
+    matched.replaceChildren(new Option("Chọn giao dịch đã ghi hoặc ghi mới", ""), ...matches.map((item) =>
+      new Option(item.note || transactionLabel(item), item.id)), new Option("Ghi giao dịch mới", "+"));
+    if (matches.length && (selected === "+" || matches.some((item) => item.id === selected))) matched.value = selected;
+    text("saving-source-help", !source && deposit ? "Giao dịch đã ghi vẫn được giữ khi bỏ liên kết."
+      : preserveImport ? "Đã liên kết với giao dịch nhập từ sao kê."
+      : source ? "Tiền gốc sẽ được ghi ra từ tài khoản này khi lưu sổ." : "");
+    $("saving-source-help").hidden = !source && !deposit;
+  }
+
   function openSaving(saving = null) {
     editingSaving = saving;
     text("saving-title", saving ? "Sửa sổ tiết kiệm" : "Thêm sổ tiết kiệm");
@@ -1390,6 +1440,14 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("saving-rate").value = saving ? saving.rate : "";
     $("saving-start").value = saving ? saving.start : today;
     $("saving-maturity").value = saving ? saving.maturity : "";
+    const deposit = savingDeposit(saving);
+    const source = deposit ? itemAccountKey(deposit) : "";
+    $("saving-source").replaceChildren(new Option("Chỉ theo dõi sổ", ""), ...accountRows()
+      .filter(([key]) => !key.startsWith("card:") && (key === source || (!deposit?.importId && !isAccountArchived(key))))
+      .map(([key]) => new Option(ledgerName(key), key)));
+    $("saving-source").value = source;
+    $("saving-deposit").value = "";
+    updateSavingDepositOptions();
     $("saving-payout").value = saving ? saving.payout : "maturity";
     $("saving-auto").checked = Boolean(saving && saving.autoSettle);
     $("saving-settled").checked = Boolean(saving && saving.settled);
@@ -1436,6 +1494,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     };
     $("add-credit").onclick = () => openCredit();
     $("new-saving").onclick = () => openSaving();
+    $("saving-source").onchange = updateSavingDepositOptions;
+    $("saving-principal").oninput = updateSavingDepositOptions;
+    $("saving-start").oninput = updateSavingDepositOptions;
     $("saving-settled").onchange = () => { $("settlement").hidden = !$("saving-settled").checked; };
     $("member-filter").onchange = resetItemResults;
     $("card-credits").onclick = (event) => {
@@ -1470,7 +1531,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     };
     $("delete-saving").onclick = () => {
       const id = editingSaving.id;
-      confirm("Xóa sổ tiết kiệm", "Xóa sổ tiết kiệm đã chọn?", "Xóa", async () => {
+      const message = editingSaving.depositId ? "Xóa sổ tiết kiệm này? Giao dịch gửi gốc vẫn được giữ trong tài khoản."
+        : "Xóa sổ tiết kiệm đã chọn?";
+      confirm("Xóa sổ tiết kiệm", message, "Xóa", async () => {
         await persist({ ...data, savings: data.savings.filter((saving) => saving.id !== id) });
         $("saving-dialog").close();
         render();
@@ -1534,10 +1597,28 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       }
       const saving = { id: editingSaving ? editingSaving.id : uid(), bank, name, principal, rate, start, maturity, settled,
         payout: $("saving-payout").value, autoSettle: $("saving-auto").checked };
+      let items = data.items;
+      const source = $("saving-source").value;
+      if (source) {
+        const current = savingDeposit(editingSaving);
+        const matches = current ? [] : matchingSavingDeposits(source, start, principal);
+        const choice = $("saving-deposit").value;
+        const existing = current || matches.find((item) => item.id === choice);
+        if (matches.length && !existing && choice !== "+") throw new Error("Chọn giao dịch đã ghi hoặc chọn Ghi giao dịch mới.");
+        if (existing?.importId && (itemAccountKey(existing) !== source || existing.amount !== principal || existing.date !== start)) {
+          throw new Error("Giữ nguyên tiền gốc và ngày gửi theo dòng sao kê đã liên kết hoặc bỏ liên kết trước.");
+        }
+        if (!existing && items.length >= domain.maxRows) throw new Error("Sổ đã đạt giới hạn 20.000 giao dịch.");
+        const deposit = { id: uid(), type: "expense", category: "other", note: "Gửi tiết kiệm · " + name, ...existing,
+          accountId: source === "cash" ? source : source.slice(5), date: start, amount: principal, purpose: "saving_out" };
+        saving.depositId = deposit.id;
+        items = existing ? items.map((item) => item.id === deposit.id ? deposit : item) : [...items, deposit];
+      }
       const savings = editingSaving ? data.savings.map((old) => old.id === saving.id ? saving : old) : [...data.savings, saving];
-      await persist({ ...data, savings });
+      await persist({ ...data, savings, items });
       $("saving-dialog").close();
       render();
+      if (source) notice("Đã lưu sổ và ghi tiền gửi tiết kiệm.");
     });
   }
 
@@ -1607,10 +1688,19 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
 
   function renderAccountList() {
-    $("account-entries").innerHTML = accountRows().filter(([key]) => !isAccountArchived(key)).map(([key, icon, subtitle]) =>
-      '<button class="menu-row" data-ledger="' + key + '">' + glyph(icon)
-      + '<span class="tx-text"><strong>' + enc(ledgerName(key)) + '</strong><small>' + subtitle + '</small></span>'
-      + svg("right") + '</button>').join("")
+    const date = balanceDate();
+    const balances = accountBalancesAt(date);
+    const accounts = accountRows().filter(([key]) => !isAccountArchived(key));
+    $("account-balance-date").hidden = !accounts.some(([key]) => !key.startsWith("card:"));
+    text("account-balance-date", "Số dư khả dụng đến " + dateName(date));
+    $("account-entries").innerHTML = accounts.map(([key, icon, subtitle]) => {
+      const { amount, anchor } = balances.get(key);
+      const available = key.startsWith("card:") ? "" : '<span class="account-list-balance"><strong>' + fmt(amount)
+        + '</strong>' + (anchor ? '' : '<small>Ước tính</small>') + '</span>';
+      return '<button class="menu-row" data-ledger="' + key + '">' + glyph(icon)
+        + '<span class="tx-text"><strong>' + enc(ledgerName(key)) + '</strong><small>' + subtitle + '</small></span>'
+        + available + svg("right") + '</button>';
+    }).join("")
       || '<p class="empty">Chưa có tài khoản đang dùng.</p>';
   }
 
@@ -1669,13 +1759,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (tab === "categories") return renderCategories();
     if (tab === "cards") return renderCards();
     if (tab === "savings") return renderSavings();
-    if (tab === "account-list") return renderAccountList();
     if (tab === "accounts") return renderSettings();
     if (tab === "archived-accounts") return renderArchivedAccounts();
-    const summary = stats();
     text("month-label", monthName(month));
     $("previous").disabled = month === "1900-01";
     $("next").disabled = month === "2999-12";
+    if (tab === "account-list") return renderAccountList();
+    const summary = stats();
     if (tab === "overview") renderOverview(summary);
     if (tab === "transactions") { renderPeriod(); renderItems(summary); }
     if (tab === "people") renderPeople();
@@ -1685,7 +1775,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     tab = next;
     const nested = accountPages.has(tab);
     const showAdd = tab === "overview" || tab === "transactions" || tab === "people";
-    $("month-controls").hidden = !["overview", "transactions", "budget", "people"].includes(tab);
+    $("month-controls").hidden = !["overview", "account-list", "transactions", "budget", "people"].includes(tab);
     $("account-back").hidden = !nested;
     $("ledger-back").hidden = tab !== "transactions";
     for (const [page, button] of Object.entries(pageActions)) $(button).hidden = page !== tab;
@@ -1918,7 +2008,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     }
     if (edit) {
       const item = data.items.find((entry) => entry.id === edit);
-      if (item) openEditor(item);
+      if (item) {
+        const saving = data.savings.find((entry) => entry.depositId === edit);
+        if (saving) openSaving(saving);
+        else openEditor(item);
+      }
     }
     if (limit) openLimit(limit);
     if (close) $(close).close();
@@ -2427,14 +2521,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const count = imports.length;
     if (bankWorking || !count) return;
     const importedTransfers = new Set(imports.map((item) => item.transferId).filter(Boolean));
+    const importedIds = new Set(imports.map((item) => item.id));
+    const linkedSavings = before.savings.filter((saving) => importedIds.has(saving.depositId));
     const name = primaryAccountName("bank:" + account);
     const message = "Xóa " + count + " giao dịch nhập từ sao kê của " + name
       + " ở tất cả các tháng? Các giao dịch nhập tay và số dư đầu kỳ bạn đã đặt vẫn được giữ."
-      + (importedTransfers.size ? " Cả hai bên của " + importedTransfers.size + " khoản chuyển liên kết sẽ được gỡ." : "");
+      + (importedTransfers.size ? " Cả hai bên của " + importedTransfers.size + " khoản chuyển liên kết sẽ được gỡ." : "")
+      + (linkedSavings.length ? " Giữ " + linkedSavings.length + " sổ tiết kiệm và bỏ liên kết với giao dịch bị xóa." : "");
     confirm("Xóa giao dịch đã nhập", message, "Xóa giao dịch", async () => {
       if (data !== before) throw new Error("Sổ đã thay đổi. Hãy kiểm tra lại số giao dịch đã nhập.");
       const items = data.items.filter((item) => !isBankImport(item, account) && !importedTransfers.has(item.transferId));
-      await persist({ ...data, items });
+      const savings = linkedSavings.length ? data.savings.map((saving) => {
+        const { depositId, ...details } = saving;
+        return importedIds.has(depositId) ? details : saving;
+      }) : data.savings;
+      await persist({ ...data, items, savings });
       bankSource = null;
       bankIdentity();
       renderBankRows();
@@ -8710,6 +8811,7 @@ function page(data, removedUnassigned = 0) {
       </div>
     </section>
     <section data-page="account-list" hidden>
+      <p class="account-balance-date" id="account-balance-date"></p>
       <div class="group" id="account-entries"></div>
     </section>
     <section data-page="transactions" hidden>
@@ -9037,6 +9139,12 @@ function page(data, removedUnassigned = 0) {
     <div class="field"><label for="saving-principal">Tiền gốc (₫)</label><input id="saving-principal" inputmode="numeric" maxlength="17" required></div>
     <div class="field"><label for="saving-rate">Lãi suất (%/năm)</label><input id="saving-rate" inputmode="decimal" maxlength="12" required></div>
     <div class="field"><label for="saving-start">Ngày gửi</label><input id="saving-start" type="date" required></div>
+    <div class="field"><label for="saving-source">Tài khoản chuyển tiền</label><select id="saving-source"></select>
+      <p id="saving-source-help" class="empty" hidden></p>
+    </div>
+    <div class="field" id="saving-deposit-field" hidden>
+      <label for="saving-deposit">Giao dịch cùng ngày và số tiền</label><select id="saving-deposit"></select>
+    </div>
     <div class="field"><label for="saving-maturity">Ngày đáo hạn</label><input id="saving-maturity" type="date" required></div>
     <div class="field"><label for="saving-payout">Lịch nhận lãi</label><select id="saving-payout">
       <option value="maturity">Cuối kỳ</option><option value="upfront">Trả trước khi gửi</option>
