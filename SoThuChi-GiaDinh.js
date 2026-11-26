@@ -8559,10 +8559,10 @@ function page(data, removedUnassigned = 0) {
   <main>
     <section data-page="overview">
       <section class="hero">
-        <h2>Chênh lệch tháng</h2><strong id="balance" class="balance"></strong>
+        <h2>Số dư khả dụng</h2><strong id="balance" class="balance"></strong>
         <div class="totals">
-          <div class="stat"><small>Thu nhập</small><strong id="income"></strong></div>
-          <div class="stat"><small>Chi tiêu</small><strong id="expense"></strong></div>
+          <div class="stat"><small>Tổng có</small><strong id="income"></strong></div>
+          <div class="stat"><small>Tổng nợ</small><strong id="expense"></strong></div>
         </div>
       </section>
       <div class="group summary-group">
