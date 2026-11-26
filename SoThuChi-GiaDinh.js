@@ -496,7 +496,7 @@ details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .period-values > div + div { border-left: 1px solid var(--line); padding-left: 10px; }
 .period-values dt { color: var(--muted); font-size: 13px; }
 .period-values dd { margin: 5px 0 0; font-size: 17px; font-weight: 740; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.ledger-credit { width: 100%; margin-bottom: 12px; }
+.ledger-action { width: 100%; margin-bottom: 12px; }
 .ledger-controls { position: relative; margin-top: 4px; }
 .search { margin-right: 103px; position: relative; }
 .search svg { position: absolute; left: 10px; top: 12px; width: 19px; height: 19px; color: var(--muted); }
@@ -1431,17 +1431,18 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("saving-source-help").hidden = !source && !deposit;
   }
 
-  function openSaving(saving = null) {
+  function openSaving(saving = null, sourceAccount = "") {
     editingSaving = saving;
     text("saving-title", saving ? "Sửa sổ tiết kiệm" : "Thêm sổ tiết kiệm");
     $("saving-bank").value = saving ? saving.bank : "";
     $("saving-name").value = saving ? saving.name : "";
     $("saving-principal").value = saving ? money.format(saving.principal) : "";
     $("saving-rate").value = saving ? saving.rate : "";
-    $("saving-start").value = saving ? saving.start : today;
+    const defaultDate = sourceAccount && !today.startsWith(month) ? month + "-01" : today;
+    $("saving-start").value = saving ? saving.start : defaultDate;
     $("saving-maturity").value = saving ? saving.maturity : "";
     const deposit = savingDeposit(saving);
-    const source = deposit ? itemAccountKey(deposit) : "";
+    const source = deposit ? itemAccountKey(deposit) : sourceAccount;
     $("saving-source").replaceChildren(new Option("Chỉ theo dõi sổ", ""), ...accountRows()
       .filter(([key]) => !key.startsWith("card:") && (key === source || (!deposit?.importId && !isAccountArchived(key))))
       .map(([key]) => new Option(ledgerName(key), key)));
@@ -1617,6 +1618,10 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       const savings = editingSaving ? data.savings.map((old) => old.id === saving.id ? saving : old) : [...data.savings, saving];
       await persist({ ...data, savings, items });
       $("saving-dialog").close();
+      if (source && tab === "transactions" && ledger === source) {
+        month = start.slice(0, 7);
+        transactionPage = 0;
+      }
       render();
       if (source) notice("Đã lưu sổ và ghi tiền gửi tiết kiệm.");
     });
@@ -1720,6 +1725,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const card = ledger.startsWith("card:");
     const anchor = domain.latestOpening(data.openings, ledger, month);
     $("ledger-credit").hidden = !card;
+    $("create-saving-in-ledger").hidden = card;
     text("period-opening-label", card ? "Dư nợ đầu kỳ" : "Số dư đầu kỳ");
     text("period-ending-label", card ? "Dư nợ cuối kỳ" : "Số dư cuối kỳ");
     let opening = anchor ? anchor.amount : 0;
@@ -2078,6 +2084,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     go("transactions");
   }
   $("ledger-credit").onclick = () => { cardId = ledger.slice(5); openCredit(); };
+  $("create-saving-in-ledger").onclick = () => openSaving(null, ledger);
   $("account-archive").onclick = () => {
     const key = ledger;
     const name = ledgerName(key);
@@ -8825,7 +8832,8 @@ function page(data, removedUnassigned = 0) {
           <button class="text-button muted-button" id="account-archive">Ẩn tài khoản</button>
         </div>
       </section>
-      <button class="secondary ledger-credit" id="ledger-credit" hidden>Trả thẻ / hoàn tiền</button>
+      <button class="secondary ledger-action" id="ledger-credit" hidden>Trả thẻ / hoàn tiền</button>
+      <button class="secondary ledger-action" id="create-saving-in-ledger" hidden><span data-icon="stash" aria-hidden="true"></span> Gửi tiết kiệm</button>
       <div class="ledger-controls">
         <div class="search"><span data-icon="search"></span><input id="query" type="search" aria-label="Tìm giao dịch" placeholder="Tìm giao dịch"></div>
         <details id="transaction-filters">
