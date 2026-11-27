@@ -2260,7 +2260,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return !editing || (editing.type === "expense" && (!editing.purpose || editing.purpose === "transfer_out"));
   }
 
-  function chooseType(next, category) {
+  function chooseType(next, category, member = $("item-member").value) {
     const picked = category === undefined && type === next ? $("category").value : category;
     type = next;
     const options = Object.entries(categories[type]);
@@ -2275,6 +2275,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const memberLabel = personFieldLabels[purpose]
       || (purpose ? "Thành viên / người liên quan" : type === "income" ? "Thu cho ai?" : "Chi cho ai?");
     text("member-label", memberLabel);
+    selectEditorPerson(member);
     text("entry-type-label", entryLabels[editorEntryMode()]);
     text("editor-account-label", cardPurchase ? "Thẻ tín dụng" : "Tài khoản");
     $("editor-add-person").hidden = !personPurpose;
@@ -2288,12 +2289,24 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       new Option(ledgerName(key) + (isAccountArchived(key) ? " (đã ẩn)" : ""), key)));
     if (usable.some(([key]) => key === selection)) account.value = selection;
   }
+  function editorPersonError(message = "") {
+    error("editor-person-error", message);
+    $("item-member").setAttribute("aria-invalid", String(Boolean(message)));
+  }
   function selectEditorPerson(member = "") {
     const select = $("item-member");
-    const options = personOptions(false, member).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id));
+    const required = relatedPurpose(purpose);
+    const options = personOptions(false, member).map(([id, name]) => {
+      const option = new Option(isArchived(id) ? name + " (đã bỏ)" : name, id);
+      option.disabled = required && id === "shared";
+      return option;
+    });
     if (member.startsWith(removedPersonPrefix)) options.unshift(new Option(personName(member), member));
-    select.replaceChildren(new Option("Chưa phân loại", ""), ...options);
+    const placeholder = purpose.startsWith("loan_") ? "Chọn người vay" : required ? "Chọn người liên quan" : "Chưa phân loại";
+    select.replaceChildren(new Option(placeholder, ""), ...options);
     select.value = member;
+    select.setAttribute("aria-required", String(required));
+    editorPersonError();
   }
   function openEditor(item = null, pair = null) {
     editing = item;
@@ -2302,7 +2315,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     editorAccount = current ? itemAccountKey(current) : tab === "cards" ? "card:" + cardId
       : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
     $("item-card").replaceChildren();
-    selectEditorPerson(item ? transactionPerson(item) : "");
     purpose = item?.purpose || "";
     cardPurchase = editorAccount.startsWith("card:");
     text("editor-title", current ? "Sửa giao dịch" : "Thêm giao dịch");
@@ -2313,7 +2325,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     text("delete", pair ? "Xóa chuyển khoản" : "Xóa");
     error("edit-error");
     if (pair) selectTransferMode();
-    else chooseType(item ? item.type : "expense", item?.category || "");
+    else chooseType(item ? item.type : "expense", item?.category || "", item ? transactionPerson(item) : "");
     $("editor").showModal();
   }
   async function saveItem(event) {
@@ -2336,8 +2348,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (member && !keepRemoved) item.member = member;
     if (keepRemoved && relatedPurpose(purpose)) item.removedMember = editing.removedMember;
     if (relatedPurpose(purpose) && (!item.removedMember && (!item.member || item.member === "shared"))) {
+      error("edit-error");
+      editorPersonError(purpose.startsWith("loan_") ? "Chọn tên người vay hoặc bấm Thêm người liên quan."
+        : "Chọn người liên quan cho khoản này.");
       $("item-member").focus();
-      return error("edit-error", "Chọn người liên quan cho khoản này.");
+      return;
     }
     if (purpose) item.purpose = purpose;
     const source = $("item-card").value;
@@ -2651,6 +2666,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("transaction-next").onclick = () => stepTransactionPage(1);
   $("edit-form").onsubmit = saveItem;
   $("delete").onclick = deleteItem;
+  $("item-member").onchange = () => editorPersonError();
   const purchaseOnCard = () => cardPurchase || $("item-card").value.startsWith("card:");
   bindGroupedAmount($("amount"), purchaseOnCard);
   bindGroupedAmount($("credit-amount"));
@@ -2678,7 +2694,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
   function actionsForEntryMode(mode) {
     let actions = entryActions[mode];
-    if (mode === "loan" && cardEditorContext()) actions = actions.filter(([action]) => action === "loan_out");
     if (mode === "savings" && !canConvertToExpense() && editing?.purpose !== "saving_out") {
       actions = actions.filter(([action]) => action === "saving_in");
     }
@@ -2698,6 +2713,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const mode = option.dataset.entryMode;
     $("entry-type-dialog").close();
     error("edit-error");
+    if (mode === "loan" && cardEditorContext()) return setEntryAction("loan_out");
     if (!entryActions[mode]) return setEntryAction(mode);
     const selectedCard = $("item-card").value;
     if (mode === "card" && !data.cards.some((card) => !isAccountArchived("card:" + card.id) || selectedCard === "card:" + card.id)) {
@@ -9620,7 +9636,8 @@ function page(data, removedUnassigned = 0) {
       <div class="member-heading"><label for="item-member" id="member-label">Chi cho ai?</label>
         <button class="text-button member-add" id="editor-add-person" type="button" aria-haspopup="dialog" hidden><span data-icon="plus" aria-hidden="true"></span>Thêm người liên quan</button>
       </div>
-      <select id="item-member"><option value="">Chưa phân loại</option></select>
+      <select id="item-member" aria-describedby="editor-person-error"><option value="">Chưa phân loại</option></select>
+      <p id="editor-person-error" class="error" role="alert" hidden></p>
     </div>
     <div class="field" id="editor-account-field"><label for="item-card" id="editor-account-label">Tài khoản</label><select id="item-card"></select></div>
     <div class="field"><label for="note">Ghi chú</label><textarea id="note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
