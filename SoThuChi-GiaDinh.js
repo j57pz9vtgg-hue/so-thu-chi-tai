@@ -1008,7 +1008,7 @@ function statementReader(validDate, isAmount, normalize) {
     try { return await import(url); }
     finally { URL.revokeObjectURL(url); }
   }
-  async function pdf(bytes) {
+  async function pdf(bytes, requestPassword) {
     pdfLoader ||= (async () => {
       globalThis.pdfjsWorker = await pdfModule("bank-pdf-worker");
       return pdfModule("bank-pdf-library");
@@ -1016,6 +1016,16 @@ function statementReader(validDate, isAmount, normalize) {
     const library = await pdfLoader;
     const task = library.getDocument({ data: bytes, isEvalSupported: false, stopAtErrors: true,
       useSystemFonts: false, disableFontFace: true, useWasm: false, enableXfa: false });
+    let cancelled = false;
+    if (requestPassword) task.onPassword = (updatePassword, reason) => {
+      const incorrect = reason === library.PasswordResponses.INCORRECT_PASSWORD;
+      Promise.resolve().then(() => requestPassword(incorrect)).then((password) => {
+        if (password === null) {
+          cancelled = true;
+          updatePassword(new Error("Đã hủy mở PDF."));
+        } else updatePassword(password);
+      }, () => updatePassword(new Error("Không thể hiện ô nhập mật khẩu.")));
+    };
     let scan = 0;
     const lines = [];
     try {
@@ -1046,7 +1056,8 @@ function statementReader(validDate, isAmount, normalize) {
         }
       }
     } catch (err) {
-      if (err.name === "PasswordException") throw new Error("PDF có mật khẩu. Hãy xuất một bản không khóa để nhập.");
+      if (cancelled) return null;
+      if (err.name === "PasswordException") throw new Error("Không thể mở tệp PDF có mật khẩu.");
       throw err;
     } finally { await task.destroy(); }
     if (!lines.length) throw new Error("PDF chỉ có ảnh hoặc không có lớp văn bản. Hãy xuất Excel hoặc CSV từ ngân hàng.");
@@ -1090,14 +1101,15 @@ function statementReader(validDate, isAmount, normalize) {
     }
     return { found, skipped: skipped + scan };
   }
-  async function read(file, card = false) {
+  async function read(file, card = false, requestPassword) {
     if (file.size > MAX_FILE) throw new Error("Tệp quá 12 MB. Hãy chia nhỏ sao kê.");
     const extension = file.name.split(".").pop().toLowerCase();
     let result;
     if (extension === "csv") result = csv(await file.text(), card);
     else if (extension === "xlsx") result = await workbook(new Uint8Array(await file.arrayBuffer()), card);
-    else if (extension === "pdf") result = await pdf(new Uint8Array(await file.arrayBuffer()));
+    else if (extension === "pdf") result = await pdf(new Uint8Array(await file.arrayBuffer()), requestPassword);
     else throw new Error("Chọn .xlsx, .csv UTF‑8 hoặc PDF có chữ. Với .xls, hãy lưu lại thành .xlsx.");
+    if (result === null) return null;
     if (result.found.length > LIMIT) throw new Error("Tối đa 2.000 dòng mỗi tệp. Hãy chia nhỏ sao kê.");
     if (!result.found.length) throw new Error("Chưa nhận ra giao dịch. Dùng Excel/CSV có cột Ngày, Nội dung và Ghi nợ/Ghi có hoặc Số tiền.");
     return result;
@@ -2803,6 +2815,48 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const bankReader = getStatementReader(domain.validDate, domain.isAmount, searchKey);
   let bankRows = [], bankPage = 0, bankFile = "", bankWorking = false, bankSource = "";
   let bankReadGeneration = 0;
+  let finishPasswordPrompt;
+
+  function answerPdfPassword(password) {
+    const finish = finishPasswordPrompt;
+    if (!finish) return;
+    finishPasswordPrompt = null;
+    $("pdf-password").value = "";
+    $("pdf-password-dialog").close();
+    finish(password);
+  }
+
+  function requestPdfPassword(incorrect, generation) {
+    if (generation !== bankReadGeneration || !$("bank-dialog").open) return Promise.resolve(null);
+    const dialog = $("pdf-password-dialog");
+    const input = $("pdf-password");
+    input.value = "";
+    error("pdf-password-error", incorrect ? "Mật khẩu không đúng. Vui lòng thử lại." : "");
+    dialog.showModal();
+    input.focus();
+    return new Promise((resolve) => { finishPasswordPrompt = resolve; });
+  }
+
+  $("pdf-password-form").onsubmit = (event) => {
+    event.preventDefault();
+    answerPdfPassword($("pdf-password").value);
+  };
+  $("pdf-password-cancel").onclick = () => answerPdfPassword(null);
+  $("pdf-password-dialog").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    answerPdfPassword(null);
+  });
+  $("pdf-password-dialog").addEventListener("close", () => {
+    if (!$("pdf-password-dialog").open) answerPdfPassword(null);
+  });
+  $("bank-dialog").addEventListener("close", () => {
+    if ($("bank-dialog").open || !bankWorking) return;
+    bankReadGeneration++;
+    answerPdfPassword(null);
+    bankWorking = false;
+    $("pick-bank-file").disabled = false;
+    text("bank-file-name", "");
+  });
   const isCardStatement = () => bankTarget.startsWith("card:");
   const statementCard = () => isCardStatement() ? data.cards.find((card) => "card:" + card.id === bankTarget) : null;
   const isStatementImport = (item, key) => Boolean(item.importId) && itemAccountKey(item) === key;
@@ -3063,8 +3117,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     renderBankRows();
     try {
       const card = isCardStatement();
-      const { found, skipped } = await bankReader.read(file, card);
+      const result = await bankReader.read(file, card, (incorrect) => requestPdfPassword(incorrect, generation));
       if (generation !== bankReadGeneration) return;
+      if (!result) {
+        text("bank-file-name", "Đã hủy mở tệp PDF.");
+        return;
+      }
+      const { found, skipped } = result;
       bankFile = file.name;
       bankSource = null;
       const history = collectHistory();
@@ -9570,6 +9629,16 @@ function page(data, removedUnassigned = 0) {
     </div>
     <div id="bank-rows"></div>
     <div class="bank-paging"><button class="secondary" id="bank-back" type="button" disabled>Trang trước</button><span id="bank-page"></span><button class="secondary" id="bank-forward" type="button" disabled>Trang sau</button></div>
+  </form>
+</dialog>
+<dialog id="pdf-password-dialog" aria-labelledby="pdf-password-title">
+  <div class="dialog-heading"><h2 id="pdf-password-title">Mở sao kê PDF</h2></div>
+  <form id="pdf-password-form" autocomplete="off">
+    <div class="field"><label for="pdf-password">Mật khẩu PDF</label>
+      <input id="pdf-password" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    </div>
+    <p id="pdf-password-error" class="error" role="alert" hidden></p>
+    <div class="form-actions"><button class="secondary" id="pdf-password-cancel" type="button">Hủy</button><button class="primary">Mở PDF</button></div>
   </form>
 </dialog>
 <dialog id="category-dialog" aria-labelledby="category-dialog-title">
