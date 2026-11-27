@@ -783,6 +783,11 @@ dialog::backdrop { background: #15201a78; }
 }
 .detail strong, .family-line small { text-align: right; }
 .family-line small { color: var(--muted); font-size: 13px; }
+#family-unassigned-count { margin-left: auto; color: var(--dark); font-size: 12px; text-align: right; }
+#family-unassigned-count:not([hidden]) + .disclosure-arrow { margin-left: 0; }
+#family-unassigned > summary { color: var(--dark); }
+#family-unassigned-totals { display: block; margin-top: 3px; color: var(--muted); font-size: 13px; font-weight: 500; }
+#family-unassigned-items { scroll-margin-top: 10px; }
 .restore-person-label { color: var(--dark); font-size: 13px; font-weight: 700; }
 #remove-closing { margin-top: 12px; }
 .saving-total { display: block; margin: 5px 0 0; font-size: clamp(23px, 7vw, 35px); color: var(--dark); overflow-wrap: anywhere; }
@@ -1167,6 +1172,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   let transfersById = indexTransfers(data.items);
   let summaryCache;
   let transactionPage = 0;
+  let familyUnassignedPage = 0;
+  let familyUnassignedMonth = "";
   const TRANSACTION_PAGE_SIZE = 50;
   let month = today.slice(0, 7);
   let tab = "overview";
@@ -1295,7 +1302,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return '<div class="bar" aria-hidden="true"><span style="width:' + Math.min(percent, 100)
       + '%;' + (color ? 'background:' + color : '') + '"></span></div>';
   }
-  function rows(items, empty) {
+  function rows(items, empty, showAccount = false) {
     if (!items.length) return '<p class="empty empty-state">' + empty + '</p>';
     let day = "";
     return items.map((item) => {
@@ -1306,7 +1313,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
       day = item.date;
       const title = item.credit || item.transferId ? name : (item.note || name);
-      const subtitle = [item.credit || item.transferId ? item.note : name, personName(transactionPerson(item))]
+      const subtitle = [item.credit || item.transferId ? item.note : name, personName(transactionPerson(item)),
+        showAccount ? ledgerName(itemAccountKey(item)) : ""]
         .filter(Boolean).join(" · ");
       const action = item.transferId ? 'data-transfer' : item.credit ? 'data-edit-credit' : 'data-edit';
       const mark = item.transferId ? "transfer" : item.credit ? "card" : icon;
@@ -1522,8 +1530,16 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
 
   function renderFamily(summary) {
     const totals = new Map();
+    const unassigned = [];
+    const pending = { income: 0, expense: 0 };
     for (const item of summary.items) {
-      if (item.purpose || !isFamilyMember(item.member)) continue;
+      if (item.purpose) continue;
+      if (!item.member) {
+        unassigned.push(item);
+        pending[item.type] += item.amount;
+        continue;
+      }
+      if (!isFamilyMember(item.member)) continue;
       const current = totals.get(item.member) || { income: 0, expense: 0 };
       current[item.type] += item.amount;
       totals.set(item.member, current);
@@ -1534,6 +1550,42 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       return '<div class="family-line"><strong>' + enc(name) + '</strong><small>Thu ' + fmt(income)
         + ' · Chi ' + fmt(expense) + '</small></div>';
     }).join("");
+    renderUnassignedFamily(unassigned, pending);
+  }
+
+  function renderUnassignedFamily(items, { income, expense }) {
+    const details = $("family-unassigned");
+    const count = $("family-unassigned-count");
+    if (familyUnassignedMonth !== month) {
+      familyUnassignedMonth = month;
+      familyUnassignedPage = 0;
+      details.open = false;
+    }
+    details.hidden = count.hidden = !items.length;
+    if (!items.length) details.open = false;
+    text("family-unassigned-count", money.format(items.length) + " cần gán");
+    text("family-unassigned-totals", "Thu " + fmt(income) + " · Chi " + fmt(expense));
+
+    const list = $("family-unassigned-items");
+    const pages = Math.max(1, Math.ceil(items.length / TRANSACTION_PAGE_SIZE));
+    $("family-unassigned-paging").hidden = pages <= 1;
+    const previous = $("family-unassigned-prev");
+    const next = $("family-unassigned-next");
+    function showPage(page) {
+      familyUnassignedPage = Math.min(Math.max(page, 0), pages - 1);
+      const start = familyUnassignedPage * TRANSACTION_PAGE_SIZE;
+      list.innerHTML = items.length ? rows(items.slice(start, start + TRANSACTION_PAGE_SIZE), "", true) : "";
+      previous.disabled = familyUnassignedPage === 0;
+      next.disabled = familyUnassignedPage === pages - 1;
+      text("family-unassigned-page", "Trang " + (familyUnassignedPage + 1) + "/" + pages);
+    }
+    for (const [button, delta] of [[previous, -1], [next, 1]]) {
+      button.onclick = () => {
+        showPage(familyUnassignedPage + delta);
+        list.scrollIntoView({ block: "start" });
+      };
+    }
+    showPage(familyUnassignedPage);
   }
 
   function renderCardList() {
@@ -9402,8 +9454,23 @@ function page(data, removedUnassigned = 0) {
           <div class="report-content" id="breakdown"></div>
         </details>
         <details class="details-divider">
-          <summary class="summary-line"><span data-icon="people"></span>Thu chi gia đình<span class="disclosure-arrow" data-icon="right"></span></summary>
-          <div class="report-content" id="family-summary"></div>
+          <summary class="summary-line">
+            <span data-icon="people"></span><span>Thu chi gia đình</span>
+            <small id="family-unassigned-count" hidden></small><span class="disclosure-arrow" data-icon="right"></span>
+          </summary>
+          <div class="report-content">
+            <div id="family-summary"></div>
+            <details id="family-unassigned" hidden>
+              <summary class="summary-line">
+                <span><span>Chưa xác định</span> <small id="family-unassigned-totals"></small></span>
+                <span class="disclosure-arrow" data-icon="right"></span>
+              </summary>
+              <div id="family-unassigned-items"></div>
+              <div class="bank-paging" id="family-unassigned-paging" hidden>
+                <button class="secondary" id="family-unassigned-prev">Trang trước</button><span id="family-unassigned-page" aria-live="polite"></span><button class="secondary" id="family-unassigned-next">Trang sau</button>
+              </div>
+            </details>
+          </div>
         </details>
       </div>
     </section>
