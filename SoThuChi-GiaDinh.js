@@ -391,7 +391,7 @@ function model() {
       if (member !== undefined && (typeof member !== "string" || deletedMembers.has(member)
           || (!own(members, member) && !personIds.has(member)))) invalid();
       if (purpose !== undefined && (typeof purpose !== "string" || !own(purposes, purpose) || purposes[purpose][1] !== type
-          || cardId)) invalid();
+          || (cardId && purpose !== "loan_out"))) invalid();
       const related = relatedPurpose(purpose);
       if (removedMember !== undefined && (!related || member !== undefined || !validId(removedMember)
           || own(members, removedMember) || personIds.has(removedMember) || removedMember === "unassigned")) invalid();
@@ -2237,8 +2237,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   };
 
   function editorEntryMode() {
-    if (cardPurchase) return "card";
     if (purpose.startsWith("loan_")) return "loan";
+    if (cardPurchase) return "card";
     if (purpose.startsWith("borrow_")) return "borrow";
     if (purpose.startsWith("saving_")) return "savings";
     if (purpose.startsWith("transfer")) return "transfer";
@@ -2252,7 +2252,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
 
   function canChooseMode(mode) {
     if (editingTransfer) return mode === "transfer";
-    if (cardEditorContext()) return mode === "expense" || mode === "card";
+    if (cardEditorContext()) return mode === "expense" || mode === "card" || mode === "loan";
     return mode !== "transfer" || !editing?.purpose || transactionKind(editing) === "transfer";
   }
 
@@ -2280,7 +2280,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("editor-add-person").hidden = !personPurpose;
     const account = $("item-card");
     const selection = account.options.length ? account.value : editorAccount;
-    const allowCard = type === "expense" && !purpose;
+    const allowCard = type === "expense" && (!purpose || purpose === "loan_out");
     const original = editing && itemAccountKey(editing);
     const usable = accountRows().filter(([key]) => (cardPurchase ? key.startsWith("card:") : !key.startsWith("card:") || allowCard)
       && (!isAccountArchived(key) || key === original));
@@ -2667,7 +2667,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (mode === "saving_out") return openSaving(null, $("item-card").value, true);
     if (mode === "card_payment" || mode === "card_refund") return openCredit(null, mode === "card_payment" ? "payment" : "refund");
 
-    cardPurchase = mode === "card_purchase" || (mode === "expense" && cardEditorContext());
+    cardPurchase = mode === "card_purchase" || ((mode === "expense" || mode === "loan_out") && cardEditorContext());
     purpose = domain.purposes[mode] ? mode : "";
     chooseType(purpose ? domain.purposes[purpose][1] : cardPurchase ? "expense" : mode);
     if (cardPurchase) {
@@ -2678,6 +2678,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   }
   function actionsForEntryMode(mode) {
     let actions = entryActions[mode];
+    if (mode === "loan" && cardEditorContext()) actions = actions.filter(([action]) => action === "loan_out");
     if (mode === "savings" && !canConvertToExpense() && editing?.purpose !== "saving_out") {
       actions = actions.filter(([action]) => action === "saving_in");
     }
