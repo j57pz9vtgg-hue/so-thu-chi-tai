@@ -27,6 +27,7 @@ function model() {
   }
   const maxAmount = 100_000_000_000;
   const maxRows = 20_000;
+  const maxSplits = 50;
   const maxBackup = 24_000_000;
   const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
   const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -39,6 +40,7 @@ function model() {
   const isAmount = (value) => Number.isSafeInteger(value) && value > 0 && value <= maxAmount;
   function invalid() { throw new Error("Bản sao lưu không đúng định dạng hoặc có dữ liệu không hợp lệ."); }
   const members = { husband: "Chồng", wife: "Vợ", children: "Con thứ nhất", child2: "Con thứ hai", shared: "Chi chung" };
+  const selfMember = "self:";
   const purposes = {
     loan_out: ["Cho mượn tiền", "expense"], loan_back: ["Thu hồi tiền cho mượn", "income"],
     borrow_in: ["Vay tiền", "income"], borrow_pay: ["Trả nợ vay", "expense"],
@@ -377,6 +379,8 @@ function model() {
     });
     const transferPairs = new Map();
     const ids = new Set();
+    const knownMember = (id) => typeof id === "string" && !deletedMembers.has(id) && (own(members, id) || personIds.has(id));
+    const knownRemovedMember = (id) => validId(id) && !own(members, id) && !personIds.has(id) && id !== "unassigned";
     const items = input.items.map((item) => {
       if (!object(item) || typeof item.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(item.id)
           || ids.has(item.id) || typeof item.type !== "string" || !own(categories, item.type)
@@ -388,13 +392,11 @@ function model() {
       const { cardId, accountId, member, removedMember, purpose, importId, transferId } = item;
       if (cardId !== undefined && (type !== "expense" || !cardIds.has(cardId))) invalid();
       if (accountId !== undefined && (cardId || !accountIds.has(accountId))) invalid();
-      if (member !== undefined && (typeof member !== "string" || deletedMembers.has(member)
-          || (!own(members, member) && !personIds.has(member)))) invalid();
+      if (member !== undefined && !knownMember(member)) invalid();
       if (purpose !== undefined && (typeof purpose !== "string" || !own(purposes, purpose) || purposes[purpose][1] !== type
           || (cardId && purpose !== "loan_out"))) invalid();
       const related = relatedPurpose(purpose);
-      if (removedMember !== undefined && (!related || member !== undefined || !validId(removedMember)
-          || own(members, removedMember) || personIds.has(removedMember) || removedMember === "unassigned")) invalid();
+      if (removedMember !== undefined && (!related || member !== undefined || !knownRemovedMember(removedMember))) invalid();
       if (related && (member === "shared" || (!member && !removedMember))) invalid();
       validateImportId(importId, imports);
       if (transferId !== undefined) {
@@ -405,10 +407,26 @@ function model() {
         pair[type] = item;
         transferPairs.set(transferId, pair);
       }
+      let splits;
+      if (item.splits !== undefined) {
+        if (type !== "expense" || (!accountId && !cardId) || member !== undefined || removedMember !== undefined
+            || purpose !== undefined || transferId !== undefined) invalid();
+        splits = list(item.splits, maxSplits).map((part) => {
+          if (!object(part) || !isAmount(part.amount)) invalid();
+          const { member, removedMember, purpose } = part;
+          if (purpose !== undefined && purpose !== "loan_out") invalid();
+          if (member !== undefined && member !== selfMember && !knownMember(member)) invalid();
+          if (removedMember !== undefined && (!purpose || member !== undefined || !knownRemovedMember(removedMember))) invalid();
+          if (purpose && (member === selfMember || member === "shared" || (!member && !removedMember))) invalid();
+          return { amount: part.amount, ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}),
+            ...(purpose ? { purpose } : {}) };
+        });
+        if (splits.length < 2 || splits.reduce((total, part) => total + part.amount, 0) !== amount) invalid();
+      }
       return { id, type, category, amount, date, note, ...(cardId ? { cardId } : {}), ...(accountId ? { accountId } : {}),
         ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}),
         ...(purpose ? { purpose } : {}), ...(importId ? { importId } : {}),
-        ...(transferId ? { transferId } : {}) };
+        ...(transferId ? { transferId } : {}), ...(splits ? { splits } : {}) };
     });
     for (const { expense: from, income: to } of transferPairs.values()) {
       if (!from || !to || from.accountId === to.accountId || from.amount !== to.amount
@@ -456,16 +474,22 @@ function model() {
     }
     let transactionCount = 0;
     let relatedCount = 0;
-    const items = ledger.items.map((item) => {
-      if (item.member !== id) return item;
-      transactionCount++;
-      const { member, ...entry } = item;
-      if (!relatedPurpose(entry.purpose)) return entry;
+    function clearPerson(part) {
+      if (part.member !== id) return part;
+      const { member, ...details } = part;
+      if (!relatedPurpose(details.purpose)) return details;
       relatedCount++;
-      return { ...entry, removedMember: historyId };
+      return { ...details, removedMember: historyId };
+    }
+    const items = ledger.items.map((item) => {
+      const parts = item.splits || [item];
+      if (!parts.some((part) => part.member === id)) return item;
+      transactionCount++;
+      return item.splits ? { ...item, splits: parts.map(clearPerson) } : clearPerson(item);
     });
     if (relatedCount && (!validId(historyId) || own(members, historyId) || historyId === "unassigned"
-        || ledger.people.some((person) => person.id === historyId) || ledger.items.some((item) => item.removedMember === historyId))) {
+        || ledger.people.some((person) => person.id === historyId)
+        || ledger.items.some((item) => (item.splits || [item]).some((part) => part.removedMember === historyId)))) {
       throw new Error("Không thể lưu lịch sử người đã xóa. Hãy thử lại.");
     }
     const people = ledger.people.filter((person) => person.id !== id);
@@ -519,7 +543,7 @@ function model() {
     return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
       .map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
   }
-  return { categoryDefinitions, deleteCategory, deletePerson, maxAmount, maxRows, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, cycleDate, shiftMonth, cardCycles, cardCycle, cardMonthForDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
+  return { categoryDefinitions, deleteCategory, deletePerson, maxAmount, maxRows, maxSplits, maxBackup, isAmount, validDate, validMonth, validate, parseBackup, hasAccount, assignedLedger, localDate, members, selfMember, cycleDate, shiftMonth, cardCycles, cardCycle, cardMonthForDate, dueDate, latestOpening, cardBalance, statement, savingSchedule, payoutLabels, purposes, relatedPurpose };
 }
 
 const css = `
@@ -770,6 +794,14 @@ dialog::backdrop { background: #15201a78; }
 .amount-field input { padding-right: 33px; }
 .amount-field span { position: absolute; right: 11px; bottom: 13px; color: var(--muted); font-size: 15px; pointer-events: none; }
 .error { color: var(--red); font-size: 14px; margin: 8px 0; }
+.split-editor { margin: 2px 0 10px; }
+.split-editor h3 { color: var(--dark); font-size: 15px; }
+.split-portion { padding: 10px 0; border-top: 1px solid var(--line); }
+.split-portion .field-pair { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); margin-bottom: 0; }
+.split-portion .field { margin-bottom: 0; }
+.split-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0 12px; }
+.split-controls .check { margin: 0; font-size: 13px; }
+#split-balance { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; padding-bottom: 8px; }
 .toast {
   position: fixed; z-index: 3; bottom: calc(134px + var(--safe-bottom)); left: 50%; transform: translateX(-50%);
   width: max-content; max-width: calc(100% - 32px); background: var(--dark); color: #fff;
@@ -1194,6 +1226,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   let cardPurchase = false;
   let editing = null;
   let editingTransfer = null;
+  let editingSplits = [];
   let budgetKey = "total";
   let confirmation;
   let timer;
@@ -1278,15 +1311,20 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       editingAmount = false;
     });
   }
+  function ordinaryAmount(item) {
+    if (item.purpose) return 0;
+    return item.splits ? item.splits.reduce((total, part) => total + (part.purpose ? 0 : part.amount), 0) : item.amount;
+  }
   function summarizeSpending(items) {
     const spending = {};
     let income = 0, expense = 0;
     for (const item of items) {
-      if (item.purpose) continue;
-      if (item.type === "income") income += item.amount;
+      const amount = ordinaryAmount(item);
+      if (!amount) continue;
+      if (item.type === "income") income += amount;
       else {
-        expense += item.amount;
-        spending[item.category] = (spending[item.category] || 0) + item.amount;
+        expense += amount;
+        spending[item.category] = (spending[item.category] || 0) + amount;
       }
     }
     return { items, spending, income, expense };
@@ -1313,7 +1351,10 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         ? '<h3 class="day-heading">' + (item.date === today ? 'Hôm nay · ' : '') + dateName(item.date) + '</h3>' : "";
       day = item.date;
       const title = item.credit || item.transferId ? name : (item.note || name);
-      const subtitle = [item.credit || item.transferId ? item.note : name, personName(transactionPerson(item)),
+      const people = transactionPeople(item);
+      const member = !item.splits ? people[0] : showAccount ? "Phần chưa gán"
+        : "Chia khoản chi · " + people.slice(0, 2).join(", ") + (people.length > 2 ? " +" + (people.length - 2) : "");
+      const subtitle = [item.credit || item.transferId ? item.note : name, member,
         showAccount ? ledgerName(itemAccountKey(item)) : ""]
         .filter(Boolean).join(" · ");
       const action = item.transferId ? 'data-transfer' : item.credit ? 'data-edit-credit' : 'data-edit';
@@ -1387,6 +1428,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     return item.purpose === "transfer_in" || item.purpose === "transfer_out" ? "transfer" : item.type;
   }
 
+  function matchesLedgerDetails(item, category, member) {
+    if (!category && !member) return true;
+    if (category && (item.credit || category !== categoryKey(item.type, item.category))) return false;
+    return (item.splits || [item]).some((part) => (!category || !part.purpose)
+      && (!member || (part.member || (item.splits && part.removedMember ? "" : "unassigned")) === member));
+  }
+
   function renderItems(summary) {
     const query = searchKey($("query").value.trim());
     const member = $("member-filter").value;
@@ -1394,10 +1442,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const entries = cardReport ? cardReport.entries.map((item) => item.kind ? asCardCredit(item, cardId) : item)
       : itemsInLedger(ledger, summary.items, month);
     const results = entries.filter((item) => (filter === "all" || filter === (item.credit || transactionKind(item)))
-      && (!category || (!item.purpose && !item.credit && category === categoryKey(item.type, item.category)))
-      && (!member || (item.member || "unassigned") === member)
-      && searchKey(item.note + " " + (item.credit ? creditLabel(item.credit) : transactionLabel(item))
-        + " " + personName(transactionPerson(item))).includes(query));
+      && matchesLedgerDetails(item, category, member)
+      && (!query || searchKey([item.note, item.credit ? creditLabel(item.credit) : transactionLabel(item),
+        ...(item.splits ? ["Chia khoản chi"] : []), ...transactionPeople(item)].join(" ")).includes(query)));
     const pages = Math.max(1, Math.ceil(results.length / TRANSACTION_PAGE_SIZE));
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
@@ -1447,8 +1494,14 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   const removedPersonPrefix = "removed:";
   const transactionPerson = (item) => item.member || (item.removedMember ? removedPersonPrefix + item.removedMember : "");
   const personName = (id = "") => id.startsWith(removedPersonPrefix) ? "Người đã xóa"
+    : id === domain.selfMember ? "Tôi"
     : Object.prototype.hasOwnProperty.call(domain.members, id) ? domain.members[id] : peopleById.get(id)?.name || "";
-  const isFamilyMember = (id) => Object.prototype.hasOwnProperty.call(domain.members, id) || peopleById.get(id)?.family === true;
+  const isFamilyMember = (id) => id === domain.selfMember || Object.prototype.hasOwnProperty.call(domain.members, id)
+    || peopleById.get(id)?.family === true;
+  function transactionPeople(item) {
+    if (!item.splits) return [personName(transactionPerson(item))];
+    return [...new Set(item.splits.map((part) => personName(transactionPerson(part)) || "Chưa phân loại"))];
+  }
   function indexTransfers(items) {
     const pairs = new Map();
     for (const item of items) {
@@ -1483,6 +1536,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function refreshPeople() {
     const selection = $("member-filter").value;
     $("member-filter").replaceChildren(new Option("Tất cả", ""), new Option("Chưa phân loại", "unassigned"),
+      new Option(personName(domain.selfMember), domain.selfMember),
       ...personOptions(true).map(([id, name]) => new Option(isArchived(id) ? name + " (đã bỏ)" : name, id)));
     $("member-filter").value = [...$("member-filter").options].some((option) => option.value === selection) ? selection : "";
   }
@@ -1490,16 +1544,19 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function peopleBalances(date) {
     const totals = new Map();
     for (const item of data.items) {
-      if (item.date > date || !relatedPurpose(item.purpose || "")) continue;
-      const person = transactionPerson(item);
-      const current = totals.get(person) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
+      if (item.date > date) continue;
       const direction = item.type === "income" ? 1 : -1;
-      if (item.purpose.startsWith("loan_")) current.loan -= direction * item.amount;
-      else if (item.purpose.startsWith("borrow_")) {
-        current.borrow += direction * item.amount;
-        current.hasBorrow = true;
-      } else current.proxy += direction * item.amount;
-      totals.set(person, current);
+      for (const part of item.splits || [item]) {
+        if (!relatedPurpose(part.purpose || "")) continue;
+        const person = transactionPerson(part);
+        const current = totals.get(person) || { loan: 0, borrow: 0, hasBorrow: false, proxy: 0 };
+        if (part.purpose.startsWith("loan_")) current.loan -= direction * part.amount;
+        else if (part.purpose.startsWith("borrow_")) {
+          current.borrow += direction * part.amount;
+          current.hasBorrow = true;
+        } else current.proxy += direction * part.amount;
+        totals.set(person, current);
+      }
     }
     return totals;
   }
@@ -1533,18 +1590,22 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const unassigned = [];
     const pending = { income: 0, expense: 0 };
     for (const item of summary.items) {
-      if (item.purpose) continue;
-      if (!item.member) {
-        unassigned.push(item);
-        pending[item.type] += item.amount;
-        continue;
+      let amountPending = 0;
+      for (const part of item.splits || [item]) {
+        if (part.purpose) continue;
+        if (!part.member) amountPending += part.amount;
+        else if (isFamilyMember(part.member)) {
+          const current = totals.get(part.member) || { income: 0, expense: 0 };
+          current[item.type] += part.amount;
+          totals.set(part.member, current);
+        }
       }
-      if (!isFamilyMember(item.member)) continue;
-      const current = totals.get(item.member) || { income: 0, expense: 0 };
-      current[item.type] += item.amount;
-      totals.set(item.member, current);
+      if (!amountPending) continue;
+      unassigned.push(item.splits ? { ...item, amount: amountPending } : item);
+      pending[item.type] += amountPending;
     }
     const people = personOptions(true).filter(([id]) => isFamilyMember(id) && (!isArchived(id) || totals.has(id)));
+    if (totals.has(domain.selfMember)) people.unshift([domain.selfMember, personName(domain.selfMember)]);
     $("family-summary").innerHTML = people.map(([key, name]) => {
       const { income = 0, expense = 0 } = totals.get(key) || {};
       return '<div class="family-line"><strong>' + enc(name) + '</strong><small>Thu ' + fmt(income)
@@ -1665,7 +1726,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function matchingPaymentDebits(source, date, amount) {
     if (!source || !domain.validDate(date) || !domain.isAmount(amount)) return [];
     return data.items.filter((item) => item.date === date && item.amount === amount && item.type === "expense"
-      && itemAccountKey(item) === source && !item.transferId && (!item.purpose || item.purpose === "transfer_out"));
+      && itemAccountKey(item) === source && !item.transferId && !item.splits && (!item.purpose || item.purpose === "transfer_out"));
   }
 
   function updateCreditSource() {
@@ -1747,7 +1808,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (!source || !domain.validDate(date) || !domain.isAmount(amount)) return [];
     const linked = new Set(data.savings.map((saving) => saving.depositId));
     return data.items.filter((item) => item.date === date && item.amount === amount && item.type === "expense"
-      && itemAccountKey(item) === source && !item.transferId && !linked.has(item.id)
+      && itemAccountKey(item) === source && !item.transferId && !item.splits && !linked.has(item.id)
       && (!item.purpose || item.purpose === "saving_out" || item.purpose === "transfer_out"));
   }
 
@@ -2269,7 +2330,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     $("category-field").hidden = Boolean(purpose);
     const transfer = purpose === "transfer";
     $("transfer-fields").hidden = !transfer;
-    $("editor-person-field").hidden = $("editor-account-field").hidden = transfer;
+    $("editor-account-field").hidden = transfer;
     $("transfer-conversion-note").hidden = !transfer || !editing;
     const personPurpose = relatedPurpose(purpose);
     const memberLabel = personFieldLabels[purpose]
@@ -2288,6 +2349,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     account.replaceChildren(new Option("Chọn tài khoản", ""), ...usable.map(([key]) =>
       new Option(ledgerName(key) + (isAccountArchived(key) ? " (đã ẩn)" : ""), key)));
     if (usable.some(([key]) => key === selection)) account.value = selection;
+    renderSplitEditor();
   }
   function editorPersonError(message = "") {
     error("editor-person-error", message);
@@ -2308,9 +2370,83 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     select.setAttribute("aria-required", String(required));
     editorPersonError();
   }
+  function isBorrowerShare(share) {
+    return Boolean(share.removedMember || (share.member && share.member !== domain.selfMember && share.member !== "shared"));
+  }
+  function updateSplitBalance() {
+    if (!editingSplits.length) return;
+    error("split-error");
+    const total = amountFrom($("amount").value);
+    const assigned = editingSplits.reduce((sum, share) => sum + (domain.isAmount(share.amount) ? share.amount : 0), 0);
+    const valid = domain.isAmount(total);
+    const remaining = total - assigned;
+    text("split-balance", !valid ? "Nhập tổng số tiền của giao dịch."
+      : remaining > 0 ? "Còn " + fmt(remaining) + " chưa chia"
+      : remaining < 0 ? "Đã chia vượt " + fmt(-remaining) : "Đã chia đủ " + fmt(total));
+    $("split-equal").disabled = !valid || total < editingSplits.length;
+  }
+  function equalSplit() {
+    const total = amountFrom($("amount").value);
+    if (!domain.isAmount(total) || total < editingSplits.length) return;
+    const amount = Math.floor(total / editingSplits.length);
+    const remainder = total % editingSplits.length;
+    editingSplits.forEach((share, index) => { share.amount = amount + Number(index < remainder); });
+  }
+  function renderSplitEditor() {
+    const allowed = type === "expense" && !purpose;
+    const active = allowed && editingSplits.length > 0;
+    $("split-editor").hidden = !allowed;
+    $("editor-person-field").hidden = purpose === "transfer" || active;
+    $("split-title").hidden = $("split-fields").hidden = !active;
+    $("choose-entry-type").disabled = active;
+    $("split-toggle").setAttribute("aria-expanded", String(active));
+    text("split-toggle", active ? "Bỏ chia" : "Chia khoản chi");
+    error("split-error");
+    if (!active) {
+      $("split-rows").replaceChildren();
+      return;
+    }
+    const full = editingSplits.length >= domain.maxSplits;
+    $("split-add").disabled = full;
+    $("split-person").disabled = full && !editingSplits.some((share) => !transactionPerson(share));
+    $("split-rows").innerHTML = editingSplits.map((share, index) => {
+      const selected = transactionPerson(share);
+      const options = [["", share.existingUnassigned ? "Chưa xác định" : "Chọn người"], [domain.selfMember, "Tôi"],
+        ...personOptions(false, share.member)];
+      if (share.removedMember) options.push([selected, personName(selected)]);
+      return '<div class="split-portion" data-split-row="' + index + '"><div class="field-pair">'
+        + '<div class="field"><label for="split-member-' + index + '">Người nhận phần ' + (index + 1) + '</label>'
+        + '<select id="split-member-' + index + '" data-split-key="member">'
+        + options.map(([id, name]) => '<option value="' + enc(id) + '"' + (id === selected ? ' selected' : '') + '>'
+          + enc(name) + '</option>').join("") + '</select></div>'
+        + '<div class="field"><label for="split-amount-' + index + '">Số tiền phần ' + (index + 1) + '</label>'
+        + '<input id="split-amount-' + index + '" data-split-key="amount" inputmode="numeric" maxlength="17" value="'
+        + (domain.isAmount(share.amount) ? money.format(share.amount) : '') + '"></div></div>'
+        + '<div class="split-controls"><label class="check"><input type="checkbox" data-split-key="reimburse"'
+        + (share.purpose === "loan_out" ? ' checked' : '') + (isBorrowerShare(share) ? '' : ' disabled') + '> Sẽ trả lại</label>'
+        + '<button class="text-button" type="button" data-split-remove="' + index + '" aria-label="Bỏ phần ' + (index + 1) + '"'
+        + (editingSplits.length <= 2 ? ' hidden' : '') + '>Bỏ phần</button></div></div>';
+    }).join("");
+    for (const field of $("split-rows").querySelectorAll('[data-split-key="amount"]')) bindGroupedAmount(field);
+    updateSplitBalance();
+  }
+  function splitValues(total) {
+    if (editingSplits.some((share) => !domain.isAmount(share.amount))) {
+      throw new Error("Nhập số tiền lớn hơn 0 cho từng phần.");
+    }
+    if (editingSplits.some((share) => !transactionPerson(share) && !share.existingUnassigned)) {
+      throw new Error("Chọn người cho từng phần.");
+    }
+    if (editingSplits.reduce((sum, share) => sum + share.amount, 0) !== total) {
+      throw new Error("Tổng các phần phải bằng số tiền của giao dịch.");
+    }
+    return editingSplits.map(({ amount, member, removedMember, purpose }) => ({ amount,
+      ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}), ...(purpose ? { purpose } : {}) }));
+  }
   function openEditor(item = null, pair = null) {
     editing = item;
     editingTransfer = pair;
+    editingSplits = (item?.splits || []).map((share) => ({ ...share, existingUnassigned: !transactionPerson(share) }));
     const current = item || pair?.expense;
     editorAccount = current ? itemAccountKey(current) : tab === "cards" ? "card:" + cardId
       : tab === "transactions" ? ledger : isAccountArchived("cash") ? "" : "cash";
@@ -2345,7 +2481,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const item = { id, type, amount, date, category: $("category").value, note };
     const member = $("item-member").value;
     const keepRemoved = editing?.removedMember && member === transactionPerson(editing);
-    if (member && !keepRemoved) item.member = member;
+    if (editingSplits.length) {
+      try { item.splits = splitValues(amount); }
+      catch (err) {
+        error("edit-error");
+        error("split-error", err.message);
+        $("split-error").scrollIntoView({ block: "nearest" });
+        return;
+      }
+    } else if (member && !keepRemoved) item.member = member;
     if (keepRemoved && relatedPurpose(purpose)) item.removedMember = editing.removedMember;
     if (relatedPurpose(purpose) && (!item.removedMember && (!item.member || item.member === "shared"))) {
       error("edit-error");
@@ -2667,8 +2811,58 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("edit-form").onsubmit = saveItem;
   $("delete").onclick = deleteItem;
   $("item-member").onchange = () => editorPersonError();
+  $("split-toggle").onclick = () => {
+    if (editingSplits.length) editingSplits = [];
+    else {
+      const member = $("item-member").value;
+      editingSplits = [{ amount: 0, member: domain.selfMember }, { amount: 0, member }];
+      equalSplit();
+    }
+    renderSplitEditor();
+  };
+  $("split-add").onclick = () => {
+    if (editingSplits.length >= domain.maxSplits) return;
+    editingSplits.push({ amount: 0 });
+    renderSplitEditor();
+    $("split-member-" + (editingSplits.length - 1)).focus();
+  };
+  $("split-equal").onclick = () => {
+    equalSplit();
+    renderSplitEditor();
+  };
+  $("split-person").onclick = () => openPerson("", true);
+  $("split-rows").onclick = (event) => {
+    const button = event.target.closest("[data-split-remove]");
+    if (!button || editingSplits.length <= 2) return;
+    editingSplits.splice(Number(button.dataset.splitRemove), 1);
+    renderSplitEditor();
+  };
+  $("split-rows").oninput = (event) => {
+    const field = event.target;
+    if (field.dataset.splitKey !== "amount") return;
+    editingSplits[Number(field.closest("[data-split-row]").dataset.splitRow)].amount = amountFrom(field.value);
+    updateSplitBalance();
+  };
+  $("split-rows").onchange = (event) => {
+    const field = event.target;
+    const row = field.closest("[data-split-row]");
+    if (!row || field.dataset.splitKey === "amount") return;
+    const share = editingSplits[Number(row.dataset.splitRow)];
+    const reimburse = row.querySelector('[data-split-key="reimburse"]');
+    if (field.dataset.splitKey === "member" && field.value !== transactionPerson(share)) {
+      share.member = field.value;
+      delete share.removedMember;
+      reimburse.disabled = !isBorrowerShare(share);
+      if (reimburse.disabled) reimburse.checked = false;
+    }
+    if (reimburse.checked) share.purpose = "loan_out";
+    else delete share.purpose;
+    $("split-person").disabled = editingSplits.length >= domain.maxSplits && !editingSplits.some((entry) => !transactionPerson(entry));
+    error("split-error");
+  };
   const purchaseOnCard = () => cardPurchase || $("item-card").value.startsWith("card:");
   bindGroupedAmount($("amount"), purchaseOnCard);
+  $("amount").addEventListener("input", updateSplitBalance);
   bindGroupedAmount($("credit-amount"));
   $("item-card").addEventListener("change", () => {
     if (purchaseOnCard()) groupAmount($("amount"));
@@ -2806,12 +3000,13 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     });
   };
   $("category-filter").onchange = resetItemResults;
-  function openPerson(id = "") {
+  function openPerson(id = "", forSplit = false) {
     const person = peopleById.get(id);
     const fixed = Boolean(id && !person);
     const fromEditor = $("editor").open;
     text("person-title", id ? "Thông tin người liên quan" : fromEditor ? "Thêm người liên quan" : "Thêm người");
     $("person-form").dataset.id = id;
+    $("person-form").dataset.split = forSplit ? "1" : "";
     $("person-name").value = id ? personName(id) : "";
     $("person-name").readOnly = fixed;
     $("person-kind").value = fromEditor || (person && !person.family) ? "other" : "family";
@@ -2864,6 +3059,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   asyncForm("person-form", "person-error", async () => {
     const name = $("person-name").value.trim();
     const activeId = $("person-form").dataset.id;
+    const forSplit = $("person-form").dataset.split === "1";
     const fromEditor = $("editor").open;
     if (activeId && !peopleById.has(activeId)) return;
     const id = activeId || uid();
@@ -2877,9 +3073,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     refreshPeople();
     $("person-dialog").close();
     if (fromEditor && $("editor").open) {
-      selectEditorPerson(id);
+      if (forSplit && editingSplits.length) {
+        const index = editingSplits.findIndex((share) => !transactionPerson(share));
+        if (index >= 0) editingSplits[index].member = id;
+        else if (editingSplits.length < domain.maxSplits) editingSplits.push({ amount: 0, member: id });
+        renderSplitEditor();
+        $("split-member-" + (index >= 0 ? index : editingSplits.length - 1)).focus({ preventScroll: true });
+      } else {
+        selectEditorPerson(id);
+        $("item-member").focus({ preventScroll: true });
+      }
       error("edit-error");
-      $("item-member").focus({ preventScroll: true });
     } else renderPeople();
   });
   refreshPeople();
@@ -2979,7 +3183,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function collectHistory() {
     const history = new Map();
     for (const entry of data.items) {
-      if (entry.purpose || !entry.note || entry.category === "other") continue;
+      if (!entry.note || entry.category === "other" || !ordinaryAmount(entry)) continue;
       const key = entry.type + "|" + searchKey(entry.note).replace(/[^a-z0-9]+/g, " ").trim();
       history.set(key, !history.has(key) || history.get(key) === entry.category ? entry.category : "");
     }
@@ -9639,6 +9843,22 @@ function page(data, removedUnassigned = 0) {
       <select id="item-member" aria-describedby="editor-person-error"><option value="">Chưa phân loại</option></select>
       <p id="editor-person-error" class="error" role="alert" hidden></p>
     </div>
+    <section class="split-editor" id="split-editor" aria-labelledby="split-title" hidden>
+      <div class="member-heading">
+        <h3 id="split-title" hidden>Phân chia khoản chi</h3>
+        <button class="text-button" type="button" id="split-toggle" aria-expanded="false" aria-controls="split-fields">Chia khoản chi</button>
+      </div>
+      <div id="split-fields" hidden>
+        <p id="split-balance" aria-live="polite"></p>
+        <div id="split-rows"></div>
+        <div class="split-controls">
+          <button class="text-button" type="button" id="split-add">Thêm phần</button>
+          <button class="text-button" type="button" id="split-equal">Chia đều</button>
+          <button class="text-button" type="button" id="split-person">Thêm người</button>
+        </div>
+        <p id="split-error" class="error" role="alert" hidden></p>
+      </div>
+    </section>
     <div class="field" id="editor-account-field"><label for="item-card" id="editor-account-label">Tài khoản</label><select id="item-card"></select></div>
     <div class="field"><label for="note">Ghi chú</label><textarea id="note" maxlength="200" placeholder="Nhập ghi chú (tùy chọn)"></textarea></div>
     <p class="empty" id="transfer-conversion-note" hidden>Lưu sẽ đổi giao dịch này thành khoản chuyển giữa hai tài khoản và gỡ danh mục, người liên quan đã gán.</p>
