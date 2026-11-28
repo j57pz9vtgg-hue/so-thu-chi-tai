@@ -413,13 +413,14 @@ function model() {
             || purpose !== undefined || transferId !== undefined) invalid();
         splits = list(item.splits, maxSplits).map((part) => {
           if (!object(part) || !isAmount(part.amount)) invalid();
-          const { member, removedMember, purpose } = part;
+          const { member, removedMember, purpose, category } = part;
           if (purpose !== undefined && purpose !== "loan_out") invalid();
+          if (category !== undefined && (purpose || typeof category !== "string" || !own(categories.expense, category))) invalid();
           if (member !== undefined && member !== selfMember && !knownMember(member)) invalid();
           if (removedMember !== undefined && (!purpose || member !== undefined || !knownRemovedMember(removedMember))) invalid();
           if (purpose && (member === selfMember || member === "shared" || (!member && !removedMember))) invalid();
           return { amount: part.amount, ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}),
-            ...(purpose ? { purpose } : {}) };
+            ...(purpose ? { purpose } : {}), ...(category ? { category } : {}) };
         });
         if (splits.length < 2 || splits.reduce((total, part) => total + part.amount, 0) !== amount) invalid();
       }
@@ -506,9 +507,13 @@ function model() {
     let transactionCount = 0;
     let limitCount = 0;
     const items = ledger.items.map((item) => {
-      if (item.type !== kind || item.category !== id) return item;
+      if (item.type !== kind) return item;
+      const splitsChanged = item.splits?.some((part) => part.category === id);
+      if (item.category !== id && !splitsChanged) return item;
       transactionCount++;
-      return { ...item, category: "other" };
+      const category = item.category === id ? "other" : item.category;
+      const splits = splitsChanged ? item.splits.map((part) => part.category === id ? { ...part, category: "other" } : part) : item.splits;
+      return { ...item, category, ...(splits ? { splits } : {}) };
     });
     const budgets = { ...ledger.budgets };
     if (kind === "expense") {
@@ -638,6 +643,9 @@ summary::-webkit-details-marker { display: none; }
 .position-summary { gap: 8px; }
 .position-summary > strong { margin-left: auto; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .position-summary > :last-child { margin-left: 0; flex: none; }
+.home-loan-activity { border-top: 1px solid var(--line); margin: 10px 0 0; padding-top: 12px; }
+.home-loan-activity h3 { color: var(--dark); font-size: 15px; }
+.home-loan-activity [data-activity-items] { scroll-margin-top: 10px; }
 .disclosure-arrow svg { width: 16px; height: 16px; transition: transform .15s ease; }
 details[open] > summary .disclosure-arrow svg { transform: rotate(90deg); }
 .details-divider + .details-divider { border-top: 1px solid var(--line); }
@@ -799,6 +807,7 @@ dialog::backdrop { background: #15201a78; }
 .split-portion { padding: 10px 0; border-top: 1px solid var(--line); }
 .split-portion .field-pair { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); margin-bottom: 0; }
 .split-portion .field { margin-bottom: 0; }
+.split-portion > .field { margin-top: 6px; }
 .split-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0 12px; }
 .split-controls .check { margin: 0; font-size: 13px; }
 #split-balance { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; padding-bottom: 8px; }
@@ -1311,20 +1320,20 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       editingAmount = false;
     });
   }
-  function ordinaryAmount(item) {
-    if (item.purpose) return 0;
-    return item.splits ? item.splits.reduce((total, part) => total + (part.purpose ? 0 : part.amount), 0) : item.amount;
-  }
   function summarizeSpending(items) {
     const spending = {};
     let income = 0, expense = 0;
     for (const item of items) {
-      const amount = ordinaryAmount(item);
-      if (!amount) continue;
-      if (item.type === "income") income += amount;
-      else {
-        expense += amount;
-        spending[item.category] = (spending[item.category] || 0) + amount;
+      if (item.purpose) continue;
+      if (item.type === "income") {
+        income += item.amount;
+        continue;
+      }
+      for (const part of item.splits || [item]) {
+        if (part.purpose) continue;
+        const category = part.category || item.category;
+        expense += part.amount;
+        spending[category] = (spending[category] || 0) + part.amount;
       }
     }
     return { items, spending, income, expense };
@@ -1353,13 +1362,14 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       const title = item.credit || item.transferId ? name : (item.note || name);
       const people = transactionPeople(item);
       const member = !item.splits ? people[0] : showAccount ? "Phần chưa gán"
-        : "Chia khoản chi · " + people.slice(0, 2).join(", ") + (people.length > 2 ? " +" + (people.length - 2) : "");
-      const subtitle = [item.credit || item.transferId ? item.note : name, member,
+        : people.slice(0, 2).join(", ") + (people.length > 2 ? " +" + (people.length - 2) : "");
+      const description = item.credit || item.transferId ? item.note : item.splits && title === name ? "" : name;
+      const subtitle = [description, member,
         showAccount ? ledgerName(itemAccountKey(item)) : ""]
         .filter(Boolean).join(" · ");
       const action = item.transferId ? 'data-transfer' : item.credit ? 'data-edit-credit' : 'data-edit';
-      const mark = item.transferId ? "transfer" : item.credit ? "card" : icon;
-      return header + '<button class="tx" ' + action + '="' + (item.transferId || item.id) + '">' + glyph(mark, item.category)
+      const mark = item.transferId ? "transfer" : item.credit ? "card" : item.splits ? "list" : icon;
+      return header + '<button class="tx" ' + action + '="' + (item.transferId || item.id) + '">' + glyph(mark, item.splits ? "" : item.category)
         + '<span class="tx-text"><strong>' + enc(title) + '</strong><small>' + enc(subtitle)
         + '</small></span><span class="amount' + (incoming ? ' income' : '') + '">'
         + signed(incoming ? item.amount : -item.amount) + '</span></button>';
@@ -1391,11 +1401,11 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       return '<div class="breakdown">' + glyph(icon) + '<div><b>' + enc(name) + '</b>' + bar(percent, color)
         + '</div><span>' + percent + '%</span><strong>' + fmt(amount) + '</strong></div>';
     }).join("") || '<p class="empty">Chưa có khoản chi trong tháng này.</p>';
-    renderPositions(date, balances);
+    renderPositions(date, balances, summary.items);
     renderFamily(summary);
   }
 
-  function renderPositions(date, balances) {
+  function renderPositions(date, balances, monthItems) {
     const savings = data.savings.filter((saving) => saving.start <= date && !(saving.settled?.date <= date))
       .sort((a, b) => a.maturity.localeCompare(b.maturity));
     const principal = savings.reduce((total, saving) => total + (savingClosed(saving, date) ? 0 : saving.principal), 0);
@@ -1423,6 +1433,66 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       $(id + "-list").innerHTML = entries.map(([name, amount]) => detail(enc(name), fmt(amount))).join("")
         || '<p class="empty">' + empty + '</p>';
     }
+    renderMonthlyLoans(monthItems);
+  }
+
+  let loanActivityMonth = "";
+  const loanActivityPages = new Map();
+
+  function renderMonthlyLoans(monthItems) {
+    const lending = [];
+    const borrowing = [];
+    const totals = { loan_out: 0, loan_back: 0, borrow_in: 0, borrow_pay: 0 };
+    for (const item of monthItems) {
+      for (const part of item.splits || [item]) {
+        const { amount, member, removedMember, purpose } = part;
+        let entries;
+        switch (purpose) {
+          case "loan_out":
+          case "loan_back": entries = lending; break;
+          case "borrow_in":
+          case "borrow_pay": entries = borrowing; break;
+          default: continue;
+        }
+        totals[purpose] += amount;
+        entries.push(item.splits ? { ...item, splits: undefined, amount, member, removedMember, purpose } : item);
+      }
+    }
+    if (loanActivityMonth !== month) {
+      loanActivityMonth = month;
+      loanActivityPages.clear();
+    }
+    renderLoanActivity("home-lending-activity", lending, [
+      ["Đã cho vay", totals.loan_out], ["Đã thu hồi", totals.loan_back],
+    ], "Chưa có giao dịch cho vay trong tháng này.");
+    renderLoanActivity("home-debt-activity", borrowing, [
+      ["Đã đi vay", totals.borrow_in], ["Đã hoàn trả", totals.borrow_pay],
+    ], "Chưa có giao dịch đi vay trong tháng này.");
+  }
+
+  function renderLoanActivity(id, entries, totals, empty) {
+    $(id + "-summary").innerHTML = totals.map(([label, amount]) => detail(label, fmt(amount))).join("");
+    const list = $(id + "-items");
+    const pages = Math.max(1, Math.ceil(entries.length / TRANSACTION_PAGE_SIZE));
+    $(id + "-paging").hidden = pages <= 1;
+    const previous = $(id + "-prev");
+    const next = $(id + "-next");
+    function showPage(page) {
+      const current = Math.min(Math.max(page, 0), pages - 1);
+      loanActivityPages.set(id, current);
+      const start = current * TRANSACTION_PAGE_SIZE;
+      list.innerHTML = rows(entries.slice(start, start + TRANSACTION_PAGE_SIZE), empty, true);
+      previous.disabled = current === 0;
+      next.disabled = current === pages - 1;
+      text(id + "-page", "Trang " + (current + 1) + "/" + pages);
+    }
+    for (const [button, delta] of [[previous, -1], [next, 1]]) {
+      button.onclick = () => {
+        showPage(loanActivityPages.get(id) + delta);
+        list.scrollIntoView({ block: "start" });
+      };
+    }
+    showPage(loanActivityPages.get(id) || 0);
   }
   function transactionKind(item) {
     return item.purpose === "transfer_in" || item.purpose === "transfer_out" ? "transfer" : item.type;
@@ -1430,9 +1500,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
 
   function matchesLedgerDetails(item, category, member) {
     if (!category && !member) return true;
-    if (category && (item.credit || category !== categoryKey(item.type, item.category))) return false;
-    return (item.splits || [item]).some((part) => (!category || !part.purpose)
+    if (category && item.credit) return false;
+    return (item.splits || [item]).some((part) => (!category || (!part.purpose && category === categoryKey(item.type, part.category || item.category)))
       && (!member || (part.member || (item.splits && part.removedMember ? "" : "unassigned")) === member));
+  }
+
+  function matchesLedgerQuery(item, query) {
+    const terms = [item.note, item.credit ? creditLabel(item.credit) : transactionLabel(item), ...transactionPeople(item)];
+    for (const part of item.splits || []) {
+      if (!part.purpose) terms.push(categories.expense[part.category || item.category][0]);
+    }
+    return searchKey(terms.join(" ")).includes(query);
   }
 
   function renderItems(summary) {
@@ -1443,8 +1521,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       : itemsInLedger(ledger, summary.items, month);
     const results = entries.filter((item) => (filter === "all" || filter === (item.credit || transactionKind(item)))
       && matchesLedgerDetails(item, category, member)
-      && (!query || searchKey([item.note, item.credit ? creditLabel(item.credit) : transactionLabel(item),
-        ...(item.splits ? ["Chia khoản chi"] : []), ...transactionPeople(item)].join(" ")).includes(query)));
+      && (!query || matchesLedgerQuery(item, query)));
     const pages = Math.max(1, Math.ceil(results.length / TRANSACTION_PAGE_SIZE));
     transactionPage = Math.min(transactionPage, pages - 1);
     const start = transactionPage * TRANSACTION_PAGE_SIZE;
@@ -1519,6 +1596,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
       return item.type === "income" ? "Nhận từ " + ledgerName(itemAccountKey(expense))
         : "Chuyển đến " + ledgerName(itemAccountKey(income));
     }
+    if (item.splits) return "Chia khoản chi";
     return item.purpose ? domain.purposes[item.purpose][0] : categories[item.type][item.category][0];
   }
   const isArchived = (id) => data.archivedPeople.includes(id);
@@ -2327,7 +2405,6 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const options = Object.entries(categories[type]);
     $("category").replaceChildren(...options.map(([key, [name]]) => new Option(name, key)));
     if (picked && options.some(([key]) => key === picked)) $("category").value = picked;
-    $("category-field").hidden = Boolean(purpose);
     const transfer = purpose === "transfer";
     $("transfer-fields").hidden = !transfer;
     $("editor-account-field").hidden = transfer;
@@ -2373,6 +2450,15 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function isBorrowerShare(share) {
     return Boolean(share.removedMember || (share.member && share.member !== domain.selfMember && share.member !== "shared"));
   }
+  function setSplitMember(share, member) {
+    share.member = member;
+    delete share.removedMember;
+    if (isBorrowerShare(share)) share.purpose = "loan_out";
+    else delete share.purpose;
+  }
+  function showSplitCategory(share) {
+    return !share.purpose && Boolean(transactionPerson(share) || share.existingUnassigned);
+  }
   function updateSplitBalance() {
     if (!editingSplits.length) return;
     error("split-error");
@@ -2396,6 +2482,7 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const allowed = type === "expense" && !purpose;
     const active = allowed && editingSplits.length > 0;
     $("split-editor").hidden = !allowed;
+    $("category-field").hidden = Boolean(purpose) || active;
     $("editor-person-field").hidden = purpose === "transfer" || active;
     $("split-title").hidden = $("split-fields").hidden = !active;
     $("choose-entry-type").disabled = active;
@@ -2409,8 +2496,12 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     const full = editingSplits.length >= domain.maxSplits;
     $("split-add").disabled = full;
     $("split-person").disabled = full && !editingSplits.some((share) => !transactionPerson(share));
+    const categoryOptions = Object.entries(categories.expense);
+    const parentCategory = $("category").value;
     $("split-rows").innerHTML = editingSplits.map((share, index) => {
       const selected = transactionPerson(share);
+      const category = share.category || parentCategory;
+      const canBorrow = isBorrowerShare(share);
       const options = [["", share.existingUnassigned ? "Chưa xác định" : "Chọn người"], [domain.selfMember, "Tôi"],
         ...personOptions(false, share.member)];
       if (share.removedMember) options.push([selected, personName(selected)]);
@@ -2422,10 +2513,17 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
         + '<div class="field"><label for="split-amount-' + index + '">Số tiền phần ' + (index + 1) + '</label>'
         + '<input id="split-amount-' + index + '" data-split-key="amount" inputmode="numeric" maxlength="17" value="'
         + (domain.isAmount(share.amount) ? money.format(share.amount) : '') + '"></div></div>'
-        + '<div class="split-controls"><label class="check"><input type="checkbox" data-split-key="reimburse"'
-        + (share.purpose === "loan_out" ? ' checked' : '') + (isBorrowerShare(share) ? '' : ' disabled') + '> Sẽ trả lại</label>'
+        + '<div class="split-controls"><label class="check"' + (canBorrow ? '' : ' hidden')
+        + '><input type="checkbox" data-split-key="reimburse"'
+        + (share.purpose === "loan_out" ? ' checked' : '')
+        + (canBorrow && !share.removedMember ? '' : ' disabled') + '> Sẽ trả lại</label>'
         + '<button class="text-button" type="button" data-split-remove="' + index + '" aria-label="Bỏ phần ' + (index + 1) + '"'
-        + (editingSplits.length <= 2 ? ' hidden' : '') + '>Bỏ phần</button></div></div>';
+        + (editingSplits.length <= 2 ? ' hidden' : '') + '>Bỏ phần</button></div>'
+        + '<div class="field" data-split-category' + (showSplitCategory(share) ? '' : ' hidden') + '>'
+        + '<label for="split-category-' + index + '">Danh mục chi phí</label>'
+        + '<select id="split-category-' + index + '" data-split-key="category">'
+        + categoryOptions.map(([id, [name]]) => '<option value="' + enc(id) + '"' + (id === category ? ' selected' : '')
+          + '>' + enc(name) + '</option>').join("") + '</select></div></div>';
     }).join("");
     for (const field of $("split-rows").querySelectorAll('[data-split-key="amount"]')) bindGroupedAmount(field);
     updateSplitBalance();
@@ -2440,8 +2538,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (editingSplits.reduce((sum, share) => sum + share.amount, 0) !== total) {
       throw new Error("Tổng các phần phải bằng số tiền của giao dịch.");
     }
-    return editingSplits.map(({ amount, member, removedMember, purpose }) => ({ amount,
-      ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}), ...(purpose ? { purpose } : {}) }));
+    return editingSplits.map(({ amount, member, removedMember, purpose, category }) => ({ amount,
+      ...(member ? { member } : {}), ...(removedMember ? { removedMember } : {}),
+      ...(purpose ? { purpose } : category ? { category } : {}) }));
   }
   function openEditor(item = null, pair = null) {
     editing = item;
@@ -2814,8 +2913,9 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("split-toggle").onclick = () => {
     if (editingSplits.length) editingSplits = [];
     else {
-      const member = $("item-member").value;
-      editingSplits = [{ amount: 0, member: domain.selfMember }, { amount: 0, member }];
+      const share = { amount: 0 };
+      setSplitMember(share, $("item-member").value);
+      editingSplits = [{ amount: 0, member: domain.selfMember }, share];
       equalSplit();
     }
     renderSplitEditor();
@@ -2846,17 +2946,21 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   $("split-rows").onchange = (event) => {
     const field = event.target;
     const row = field.closest("[data-split-row]");
-    if (!row || field.dataset.splitKey === "amount") return;
+    const key = field.dataset.splitKey;
+    if (!row || key === "amount") return;
     const share = editingSplits[Number(row.dataset.splitRow)];
     const reimburse = row.querySelector('[data-split-key="reimburse"]');
-    if (field.dataset.splitKey === "member" && field.value !== transactionPerson(share)) {
-      share.member = field.value;
-      delete share.removedMember;
-      reimburse.disabled = !isBorrowerShare(share);
-      if (reimburse.disabled) reimburse.checked = false;
+    if (key === "member" && field.value !== transactionPerson(share)) setSplitMember(share, field.value);
+    if (key === "category") share.category = field.value;
+    if (key === "reimburse") {
+      if (reimburse.checked) share.purpose = "loan_out";
+      else delete share.purpose;
     }
-    if (reimburse.checked) share.purpose = "loan_out";
-    else delete share.purpose;
+    const canBorrow = isBorrowerShare(share);
+    reimburse.closest("label").hidden = !canBorrow;
+    reimburse.disabled = !canBorrow || Boolean(share.removedMember);
+    reimburse.checked = share.purpose === "loan_out";
+    row.querySelector("[data-split-category]").hidden = !showSplitCategory(share);
     $("split-person").disabled = editingSplits.length >= domain.maxSplits && !editingSplits.some((entry) => !transactionPerson(entry));
     error("split-error");
   };
@@ -3075,8 +3179,8 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
     if (fromEditor && $("editor").open) {
       if (forSplit && editingSplits.length) {
         const index = editingSplits.findIndex((share) => !transactionPerson(share));
-        if (index >= 0) editingSplits[index].member = id;
-        else if (editingSplits.length < domain.maxSplits) editingSplits.push({ amount: 0, member: id });
+        if (index >= 0) setSplitMember(editingSplits[index], id);
+        else if (editingSplits.length < domain.maxSplits) editingSplits.push({ amount: 0, member: id, purpose: "loan_out" });
         renderSplitEditor();
         $("split-member-" + (index >= 0 ? index : editingSplits.length - 1)).focus({ preventScroll: true });
       } else {
@@ -3183,9 +3287,16 @@ function webApp(initial, getModel, getStatementReader, removedUnassigned = 0) {
   function collectHistory() {
     const history = new Map();
     for (const entry of data.items) {
-      if (!entry.note || entry.category === "other" || !ordinaryAmount(entry)) continue;
+      if (!entry.note || entry.purpose) continue;
+      let category = entry.category;
+      if (entry.splits) {
+        const assigned = new Set(entry.splits.filter((part) => !part.purpose).map((part) => part.category || entry.category));
+        if (!assigned.size) continue;
+        category = assigned.size === 1 ? assigned.values().next().value : "";
+      }
+      if (category === "other") continue;
       const key = entry.type + "|" + searchKey(entry.note).replace(/[^a-z0-9]+/g, " ").trim();
-      history.set(key, !history.has(key) || history.get(key) === entry.category ? entry.category : "");
+      history.set(key, !history.has(key) || history.get(key) === category ? category : "");
     }
     return history;
   }
@@ -9660,13 +9771,37 @@ function page(data, removedUnassigned = 0) {
           <summary class="summary-line position-summary"><span data-icon="stash"></span>Sổ tiết kiệm<strong id="home-saving-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
           <div class="report-content" id="home-saving-list"></div>
         </details>
-        <details class="details-divider">
+        <details class="details-divider" id="home-lending">
           <summary class="summary-line position-summary"><span data-icon="up"></span>Còn cho vay<strong id="home-lending-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
-          <div class="report-content" id="home-lending-list"></div>
+          <div class="report-content">
+            <div id="home-lending-list"></div>
+            <section class="home-loan-activity" id="home-lending-activity" aria-labelledby="home-lending-activity-title">
+              <h3 id="home-lending-activity-title">Cho vay trong tháng</h3>
+              <div id="home-lending-activity-summary"></div>
+              <div id="home-lending-activity-items" data-activity-items></div>
+              <div class="bank-paging" id="home-lending-activity-paging" hidden>
+                <button class="secondary" type="button" id="home-lending-activity-prev">Trang trước</button>
+                <span id="home-lending-activity-page" aria-live="polite"></span>
+                <button class="secondary" type="button" id="home-lending-activity-next">Trang sau</button>
+              </div>
+            </section>
+          </div>
         </details>
-        <details class="details-divider">
+        <details class="details-divider" id="home-debt">
           <summary class="summary-line position-summary"><span data-icon="down"></span>Đang nợ<strong id="home-debt-total"></strong><span class="disclosure-arrow" data-icon="right"></span></summary>
-          <div class="report-content" id="home-debt-list"></div>
+          <div class="report-content">
+            <div id="home-debt-list"></div>
+            <section class="home-loan-activity" id="home-debt-activity" aria-labelledby="home-debt-activity-title">
+              <h3 id="home-debt-activity-title">Đi vay trong tháng</h3>
+              <div id="home-debt-activity-summary"></div>
+              <div id="home-debt-activity-items" data-activity-items></div>
+              <div class="bank-paging" id="home-debt-activity-paging" hidden>
+                <button class="secondary" type="button" id="home-debt-activity-prev">Trang trước</button>
+                <span id="home-debt-activity-page" aria-live="polite"></span>
+                <button class="secondary" type="button" id="home-debt-activity-next">Trang sau</button>
+              </div>
+            </section>
+          </div>
         </details>
       </div>
       <div class="group summary-group">
